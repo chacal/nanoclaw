@@ -356,7 +356,7 @@ export class SignalChannel implements Channel {
  * Uses a single-pass approach: find all markers, sort by position, then strip
  * markers while tracking position offsets. This avoids cross-pattern position bugs.
  */
-function parseFormatting(input: string): {
+export function parseFormatting(input: string): {
   text: string;
   styles: string[];
 } {

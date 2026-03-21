@@ -91,7 +91,7 @@ export async function transcribeAudio(
 }
 
 /** Guess file extension from magic bytes */
-function guessExtFromFile(buf: Buffer): string | null {
+export function guessExtFromFile(buf: Buffer): string | null {
   if (buf.length < 12) return null;
   // MP3: starts with ID3 or 0xFF 0xFB
   if (buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33) return 'mp3';
