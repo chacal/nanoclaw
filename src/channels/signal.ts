@@ -3,6 +3,7 @@ import { ChildProcess, spawn } from 'child_process';
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
+import { transcribeAudio } from '../transcription.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import { Channel, RegisteredGroup } from '../types.js';
 
@@ -137,15 +138,27 @@ export class SignalChannel implements Channel {
     }
   }
 
-  private handleNotification(params: any): void {
+  private async handleNotification(params: any): Promise<void> {
     const envelope = params?.envelope;
     if (!envelope) return;
 
     const dataMessage = envelope.dataMessage;
     if (!dataMessage) return; // Skip receipts, typing indicators, etc.
 
+    // Check for voice message attachments
+    // signal-cli stores attachments at ~/.local/share/signal-cli/attachments/{id}
+    const ATTACHMENTS_DIR =
+      process.env.HOME + '/.local/share/signal-cli/attachments';
+    const attachments = dataMessage.attachments || [];
+    const voiceAttachment = attachments.find(
+      (a: any) => a.contentType?.startsWith('audio/') && a.id,
+    );
+    const voiceFilePath = voiceAttachment
+      ? `${ATTACHMENTS_DIR}/${voiceAttachment.id}`
+      : null;
+
     const text = dataMessage.message;
-    if (!text) return; // Skip non-text messages (attachments-only, etc.)
+    if (!text && !voiceFilePath) return; // Skip if no text and no voice
 
     // Signal uses UUIDs as primary identifiers; phone number may be null
     const source =
@@ -169,8 +182,32 @@ export class SignalChannel implements Channel {
       chatName = sourceName;
     }
 
+    // Build content: text message or voice transcription
+    let content = text || '';
+
+    if (voiceFilePath) {
+      const transcript = await transcribeAudio(
+        voiceFilePath,
+        voiceAttachment.contentType,
+      );
+      if (transcript) {
+        content = content
+          ? `${content}\n[Voice: ${transcript}]`
+          : `[Voice: ${transcript}]`;
+        logger.info(
+          { chatJid, chars: transcript.length },
+          'Voice message transcribed',
+        );
+      } else {
+        content = content
+          ? `${content}\n[Voice message - transcription unavailable]`
+          : '[Voice message - transcription unavailable]';
+      }
+    }
+
+    if (!content) return;
+
     // Translate @mention to trigger format (like Telegram does)
-    let content = text;
     const namePattern = new RegExp(
       `@${ASSISTANT_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
       'i',
