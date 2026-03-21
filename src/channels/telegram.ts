@@ -52,10 +52,9 @@ export async function sendPoolMessage(
   text: string,
   sender: string,
   groupFolder: string,
-): Promise<void> {
+): Promise<boolean> {
   if (poolApis.length === 0) {
-    // No pool bots — fall back to main bot sendMessage (caller handles this)
-    return;
+    return false;
   }
 
   const key = `${groupFolder}:${sender}`;
@@ -99,8 +98,10 @@ export async function sendPoolMessage(
       { chatId, sender, poolIndex: idx, length: text.length },
       'Pool message sent',
     );
+    return true;
   } catch (err) {
     logger.error({ chatId, sender, err }, 'Failed to send pool message');
+    return false;
   }
 }
 
