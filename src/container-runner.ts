@@ -13,6 +13,7 @@ import {
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   GROUPS_DIR,
+  CLAUDE_CODE_MODEL,
   IDLE_TIMEOUT,
   TIMEZONE,
 } from './config.js';
@@ -122,27 +123,56 @@ function buildVolumeMounts(
     '.claude',
   );
   fs.mkdirSync(groupSessionsDir, { recursive: true });
+
+  // --- settings.json: always regenerated from .env (single source of truth) ---
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  if (!fs.existsSync(settingsFile)) {
+  const settings: Record<string, any> = {
+    env: {
+      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+      CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+    },
+    enableAllProjectMcpServers: true,
+  };
+  if (CLAUDE_CODE_MODEL) {
+    settings.model = CLAUDE_CODE_MODEL;
+  }
+  fs.writeFileSync(
+    settingsFile,
+    JSON.stringify(settings, null, 2) + '\n',
+  );
+
+  // --- .mcp.json: merge shared config + per-group overrides on every start ---
+  // Sources:
+  //   data/sessions/shared-mcp.json        → MCP servers for all groups
+  //   groups/{folder}/.mcp.overrides.json   → per-group additions (e.g. Todoist)
+  // Output:
+  //   groups/{folder}/.mcp.json             → project-level config read by Claude Code
+  const sharedMcpPath = path.join(DATA_DIR, 'sessions', 'shared-mcp.json');
+  const overridesPath = path.join(groupDir, '.mcp.overrides.json');
+  const mcpDst = path.join(groupDir, '.mcp.json');
+
+  let mergedServers: Record<string, any> = {};
+  if (fs.existsSync(sharedMcpPath)) {
+    try {
+      const shared = JSON.parse(fs.readFileSync(sharedMcpPath, 'utf-8'));
+      mergedServers = { ...mergedServers, ...(shared.mcpServers || {}) };
+    } catch (err) {
+      logger.warn({ err }, 'Failed to parse shared-mcp.json');
+    }
+  }
+  if (fs.existsSync(overridesPath)) {
+    try {
+      const overrides = JSON.parse(fs.readFileSync(overridesPath, 'utf-8'));
+      mergedServers = { ...mergedServers, ...(overrides.mcpServers || {}) };
+    } catch (err) {
+      logger.warn({ err }, 'Failed to parse .mcp.overrides.json');
+    }
+  }
+  if (Object.keys(mergedServers).length > 0) {
     fs.writeFileSync(
-      settingsFile,
-      JSON.stringify(
-        {
-          env: {
-            // Enable agent swarms (subagent orchestration)
-            // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
-            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-            // Load CLAUDE.md from additional mounted directories
-            // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
-            CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-            // Enable Claude's memory feature (persists user preferences between sessions)
-            // https://code.claude.com/docs/en/memory#manage-auto-memory
-            CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-          },
-        },
-        null,
-        2,
-      ) + '\n',
+      mcpDst,
+      JSON.stringify({ mcpServers: mergedServers }, null, 2) + '\n',
     );
   }
 
@@ -220,6 +250,11 @@ function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Pass model override if configured
+  if (CLAUDE_CODE_MODEL) {
+    args.push('-e', `CLAUDE_CODE_MODEL=${CLAUDE_CODE_MODEL}`);
+  }
 
   // Route API traffic through the credential proxy (containers never see real secrets)
   args.push(
@@ -507,11 +542,7 @@ export async function runContainerAgent(
         // Full input is only included at verbose level to avoid
         // persisting user conversation content on every non-zero exit.
         if (isVerbose) {
-          logLines.push(
-            `=== Input ===`,
-            JSON.stringify(input, null, 2),
-            ``,
-          );
+          logLines.push(`=== Input ===`, JSON.stringify(input, null, 2), ``);
         } else {
           logLines.push(
             `=== Input Summary ===`,

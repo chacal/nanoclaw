@@ -10,4 +10,7 @@
 // telegram
 import './telegram.js';
 
+// signal
+import './signal.js';
+
 // whatsapp

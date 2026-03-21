@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git remote:*)",
+      "Bash(npx vitest:*)",
+      "Bash(npx tsx:*)",
+      "Bash(systemctl --user restart nanoclaw)",
+      "WebFetch(domain:www.npmjs.com)",
+      "Bash(docker ps:*)",
+      "WebSearch"
+    ]
+  }
+}
