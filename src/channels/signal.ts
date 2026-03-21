@@ -5,25 +5,13 @@ import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { transcribeAudio } from '../transcription.js';
 import { registerChannel, ChannelOpts } from './registry.js';
-import { Channel, RegisteredGroup } from '../types.js';
-
-export interface SignalChannelOpts {
-  onMessage: (chatJid: string, message: any) => void;
-  onChatMetadata: (
-    chatJid: string,
-    timestamp: string,
-    name?: string,
-    channel?: string,
-    isGroup?: boolean,
-  ) => void;
-  registeredGroups: () => Record<string, RegisteredGroup>;
-}
+import { Channel } from '../types.js';
 
 export class SignalChannel implements Channel {
   name = 'signal';
 
   private proc: ChildProcess | null = null;
-  private opts: SignalChannelOpts;
+  private opts: ChannelOpts;
   private phoneNumber: string;
   private signalCliPath: string;
   private connected = false;
@@ -34,11 +22,7 @@ export class SignalChannel implements Channel {
   >();
   private lineBuffer = '';
 
-  constructor(
-    phoneNumber: string,
-    signalCliPath: string,
-    opts: SignalChannelOpts,
-  ) {
+  constructor(phoneNumber: string, signalCliPath: string, opts: ChannelOpts) {
     this.phoneNumber = phoneNumber;
     this.signalCliPath = signalCliPath;
     this.opts = opts;
@@ -355,16 +339,22 @@ export class SignalChannel implements Channel {
 /**
  * Parse markdown-style formatting from text and convert to Signal body ranges.
  * Returns the plain text and an array of "start:length:STYLE" strings.
- * Processes in order: bold (**), italic (*), strikethrough (~~), monospace (`).
+ *
+ * Uses a single-pass approach: find all markers, sort by position, then strip
+ * markers while tracking position offsets. This avoids cross-pattern position bugs.
  */
 function parseFormatting(input: string): {
   text: string;
   styles: string[];
 } {
-  const styles: Array<{ start: number; length: number; style: string }> = [];
-  let text = input;
+  // Find all format markers with their positions in the original text
+  const markers: Array<{
+    index: number;
+    fullMatch: string;
+    content: string;
+    style: string;
+  }> = [];
 
-  // Process patterns from most specific to least specific
   const patterns: Array<{ re: RegExp; style: string }> = [
     { re: /\*\*(.+?)\*\*/g, style: 'BOLD' },
     { re: /(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, style: 'ITALIC' },
@@ -373,36 +363,49 @@ function parseFormatting(input: string): {
   ];
 
   for (const { re, style } of patterns) {
-    const result: string[] = [];
-    let lastIndex = 0;
-    let offset = 0;
-    let match: RegExpExecArray | null;
-
-    // Reset regex
     re.lastIndex = 0;
-
-    while ((match = re.exec(text)) !== null) {
-      const fullMatch = match[0];
-      const content = match[1];
-      const markerLen = (fullMatch.length - content.length) / 2;
-
-      result.push(text.slice(lastIndex, match.index));
-      const start = match.index - offset;
-      // UTF-16 length for signal-cli
-      const utf16Len = Buffer.from(content, 'utf16le').length / 2;
-      styles.push({ start, length: utf16Len, style });
-      result.push(content);
-      offset += markerLen * 2;
-      lastIndex = match.index + fullMatch.length;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(input)) !== null) {
+      markers.push({
+        index: match.index,
+        fullMatch: match[0],
+        content: match[1],
+        style,
+      });
     }
-    result.push(text.slice(lastIndex));
-    text = result.join('');
   }
 
-  return {
-    text,
-    styles: styles.map((s) => `${s.start}:${s.length}:${s.style}`),
-  };
+  // Remove overlapping matches (e.g. ** inside `) — keep the first one at each position
+  markers.sort((a, b) => a.index - b.index);
+  const filtered: typeof markers = [];
+  let lastEnd = 0;
+  for (const m of markers) {
+    if (m.index >= lastEnd) {
+      filtered.push(m);
+      lastEnd = m.index + m.fullMatch.length;
+    }
+  }
+
+  // Build output text and style list in a single pass
+  const styles: string[] = [];
+  let result = '';
+  let cursor = 0;
+
+  for (const m of filtered) {
+    // Append text before this marker
+    result += input.slice(cursor, m.index);
+    // Record style at the current position in the output
+    const start = Buffer.from(result, 'utf16le').length / 2;
+    const length = Buffer.from(m.content, 'utf16le').length / 2;
+    styles.push(`${start}:${length}:${m.style}`);
+    // Append the content without markers
+    result += m.content;
+    cursor = m.index + m.fullMatch.length;
+  }
+  // Append remaining text
+  result += input.slice(cursor);
+
+  return { text: result, styles };
 }
 
 registerChannel('signal', (opts: ChannelOpts) => {
