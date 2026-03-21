@@ -102,25 +102,21 @@ async function handleVoice(
   }
   const body = Buffer.concat(chunks);
 
+  const MAX_BODY_SIZE = 25 * 1024 * 1024; // 25MB — OpenAI's limit
   if (body.length === 0) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Empty audio' }));
     return;
   }
+  if (body.length > MAX_BODY_SIZE) {
+    res.writeHead(413, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Audio too large (max 25MB)' }));
+    return;
+  }
 
-  // Write to temp file for transcription
+  // Write to temp file for transcription (transcribeAudio handles format detection)
   const contentType = req.headers['content-type'] || 'audio/m4a';
-  const ext =
-    contentType.includes('m4a') || contentType.includes('mp4')
-      ? 'm4a'
-      : contentType.includes('mpeg') || contentType.includes('mp3')
-        ? 'mp3'
-        : contentType.includes('wav')
-          ? 'wav'
-          : contentType.includes('ogg')
-            ? 'ogg'
-            : 'm4a'; // iOS Shortcuts sends m4a by default
-  const tmpFile = path.join(os.tmpdir(), `nanoclaw-voice-${Date.now()}.${ext}`);
+  const tmpFile = path.join(os.tmpdir(), `nanoclaw-voice-${Date.now()}.audio`);
   fs.writeFileSync(tmpFile, body);
 
   try {
