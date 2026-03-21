@@ -42,7 +42,8 @@ export async function transcribeAudio(
   }
 
   const fileBuffer = fs.readFileSync(filePath);
-  const ext = MIME_TO_EXT[contentType || ''] || guessExtFromFile(fileBuffer) || 'm4a';
+  const ext =
+    MIME_TO_EXT[contentType || ''] || guessExtFromFile(fileBuffer) || 'm4a';
 
   for (const model of MODELS) {
     try {
@@ -82,7 +83,10 @@ export async function transcribeAudio(
     }
   }
 
-  logger.error({ filePath, ext, contentType }, 'All transcription models failed');
+  logger.error(
+    { filePath, ext, contentType },
+    'All transcription models failed',
+  );
   return null;
 }
 
