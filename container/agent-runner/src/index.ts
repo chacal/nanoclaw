@@ -392,7 +392,6 @@ async function runQuery(
   for await (const message of query({
     prompt: stream,
     options: {
-      model: process.env.CLAUDE_CODE_MODEL || undefined,
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,

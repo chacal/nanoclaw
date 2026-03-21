@@ -682,7 +682,7 @@ async function main(): Promise<void> {
     const voiceServer = startVoiceApi(voiceApiPort, {
       onMessage: channelOpts.onMessage,
       defaultJid: mainEntry[0],
-      defaultSender: 'Jouni',
+      defaultSender: ASSISTANT_NAME,
     });
     process.on('SIGTERM', () => voiceServer.close());
     process.on('SIGINT', () => voiceServer.close());

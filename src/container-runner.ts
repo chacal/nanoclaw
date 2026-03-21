@@ -94,6 +94,17 @@ function buildVolumeMounts(
       containerPath: '/workspace/group',
       readonly: false,
     });
+
+    // Overlay global memory as read-write so main can update global CLAUDE.md.
+    // The project root is read-only, but global/ is shared writable memory.
+    const globalDir = path.join(GROUPS_DIR, 'global');
+    if (fs.existsSync(globalDir)) {
+      mounts.push({
+        hostPath: globalDir,
+        containerPath: '/workspace/project/groups/global',
+        readonly: false,
+      });
+    }
   } else {
     // Other groups only get their own folder
     mounts.push({
@@ -247,11 +258,6 @@ function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
-
-  // Pass model override if configured
-  if (CLAUDE_CODE_MODEL) {
-    args.push('-e', `CLAUDE_CODE_MODEL=${CLAUDE_CODE_MODEL}`);
-  }
 
   // Route API traffic through the credential proxy (containers never see real secrets)
   args.push(
