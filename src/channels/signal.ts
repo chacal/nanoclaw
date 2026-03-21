@@ -332,7 +332,20 @@ export class SignalChannel implements Channel {
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
     if (!this.proc || !isTyping) return;
-    // Signal doesn't have a reliable typing indicator via signal-cli jsonRpc
+    try {
+      const id = jid.replace(/^signal:/, '');
+      const isPhone = id.startsWith('+');
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-/.test(id);
+      const params: any = {};
+      if (isPhone || isUuid) {
+        params.recipient = [id];
+      } else {
+        params.groupId = id;
+      }
+      await this.sendRpc('sendTyping', params);
+    } catch {
+      // Typing indicators are best-effort
+    }
   }
 }
 
