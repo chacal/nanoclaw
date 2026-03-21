@@ -137,10 +137,7 @@ function buildVolumeMounts(
   if (CLAUDE_CODE_MODEL) {
     settings.model = CLAUDE_CODE_MODEL;
   }
-  fs.writeFileSync(
-    settingsFile,
-    JSON.stringify(settings, null, 2) + '\n',
-  );
+  fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
 
   // --- .mcp.json: merge shared config + per-group overrides on every start ---
   // Sources:

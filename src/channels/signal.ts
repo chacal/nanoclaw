@@ -122,7 +122,9 @@ export class SignalChannel implements Channel {
       const pending = this.pendingRequests.get(msg.id)!;
       this.pendingRequests.delete(msg.id);
       if (msg.error) {
-        pending.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+        pending.reject(
+          new Error(msg.error.message || JSON.stringify(msg.error)),
+        );
       } else {
         pending.resolve(msg.result);
       }
@@ -151,9 +153,7 @@ export class SignalChannel implements Channel {
     if (!source) return;
 
     const sourceName = envelope.sourceName || source;
-    const timestamp = new Date(
-      envelope.timestamp || Date.now(),
-    ).toISOString();
+    const timestamp = new Date(envelope.timestamp || Date.now()).toISOString();
 
     // Determine if group or 1:1
     const groupInfo = dataMessage.groupInfo;
@@ -175,13 +175,16 @@ export class SignalChannel implements Channel {
       `@${ASSISTANT_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
       'i',
     );
-    if (isGroup && namePattern.test(content) && !TRIGGER_PATTERN.test(content)) {
+    if (
+      isGroup &&
+      namePattern.test(content) &&
+      !TRIGGER_PATTERN.test(content)
+    ) {
       content = `@${ASSISTANT_NAME} ${content}`;
     }
 
     const isFromMe =
-      source === this.phoneNumber ||
-      envelope.sourceNumber === this.phoneNumber;
+      source === this.phoneNumber || envelope.sourceNumber === this.phoneNumber;
 
     // Store chat metadata
     this.opts.onChatMetadata(chatJid, timestamp, chatName, 'signal', isGroup);
