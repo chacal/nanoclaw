@@ -479,6 +479,160 @@ describe('SignalChannel', () => {
         }),
       );
     });
+
+    it('reconstructs U+FFFC self-mention to trigger name', async () => {
+      const { opts } = await connectChannel();
+
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15551234567',
+            sourceName: 'Alice',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: '\uFFFC hello!',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+              mentions: [
+                {
+                  name: '+15559999999',
+                  number: '+15559999999',
+                  start: 0,
+                  length: 1,
+                },
+              ],
+            },
+          },
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'signal:test-group-id',
+        expect.objectContaining({
+          content: '@Andy hello!',
+        }),
+      );
+    });
+
+    it('reconstructs U+FFFC mention for other users', async () => {
+      const { opts } = await connectChannel();
+
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15551234567',
+            sourceName: 'Alice',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: 'hey \uFFFC check this',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+              mentions: [
+                {
+                  name: 'Bob',
+                  number: '+15550000000',
+                  start: 4,
+                  length: 1,
+                },
+              ],
+            },
+          },
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'signal:test-group-id',
+        expect.objectContaining({
+          content: 'hey @Bob check this',
+        }),
+      );
+    });
+
+    it('reconstructs multiple U+FFFC mentions in one message', async () => {
+      const { opts } = await connectChannel();
+
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15551234567',
+            sourceName: 'Alice',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: '\uFFFC and \uFFFC hello',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+              mentions: [
+                {
+                  name: '+15559999999',
+                  number: '+15559999999',
+                  start: 0,
+                  length: 1,
+                },
+                {
+                  name: 'Bob',
+                  number: '+15550000000',
+                  start: 6,
+                  length: 1,
+                },
+              ],
+            },
+          },
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'signal:test-group-id',
+        expect.objectContaining({
+          content: '@Andy and @Bob hello',
+        }),
+      );
+    });
+
+    it('handles message with no mentions array gracefully', async () => {
+      const { opts } = await connectChannel();
+
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15551234567',
+            sourceName: 'Alice',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: 'plain message',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+            },
+          },
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'signal:test-group-id',
+        expect.objectContaining({
+          content: 'plain message',
+        }),
+      );
+    });
   });
 
   // --- sendMessage ---
