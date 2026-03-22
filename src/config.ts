@@ -65,7 +65,7 @@ export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = safeInt(process.env.IDLE_TIMEOUT, 1800000); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
-  parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,
+  safeInt(process.env.MAX_CONCURRENT_CONTAINERS, 5),
 );
 
 export const TELEGRAM_BOT_POOL = (
