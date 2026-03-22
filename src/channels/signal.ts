@@ -193,6 +193,7 @@ export class SignalChannel implements Channel {
       for (const m of sorted) {
         const start = m.start ?? 0;
         const len = m.length ?? 1;
+        if (start < 0 || start >= content.length) continue;
         // Signal puts phone number or UUID as mention name — map our own
         // number/UUID to the assistant name so the trigger pattern matches.
         const isSelf = m.number === this.phoneNumber;
