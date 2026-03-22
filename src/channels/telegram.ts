@@ -4,7 +4,7 @@ import { Api, Bot } from 'grammy';
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
-import { registerChannel, ChannelOpts } from './registry.js';
+import { registerChannel, chunkText, ChannelOpts } from './registry.js';
 import {
   Channel,
   OnChatMetadata,
@@ -82,17 +82,8 @@ export async function sendPoolMessage(
   const api = poolApis[idx];
   try {
     const numericId = chatId.replace(/^tg:/, '');
-    const MAX_LENGTH = 4096;
-    if (text.length <= MAX_LENGTH) {
-      await sendTelegramMessage(api, numericId, text);
-    } else {
-      for (let i = 0; i < text.length; i += MAX_LENGTH) {
-        await sendTelegramMessage(
-          api,
-          numericId,
-          text.slice(i, i + MAX_LENGTH),
-        );
-      }
+    for (const chunk of chunkText(text, 4096)) {
+      await sendTelegramMessage(api, numericId, chunk);
     }
     logger.info(
       { chatId, sender, poolIndex: idx, length: text.length },
@@ -338,19 +329,8 @@ export class TelegramChannel implements Channel {
 
     try {
       const numericId = jid.replace(/^tg:/, '');
-
-      // Telegram has a 4096 character limit per message — split if needed
-      const MAX_LENGTH = 4096;
-      if (text.length <= MAX_LENGTH) {
-        await sendTelegramMessage(this.bot.api, numericId, text);
-      } else {
-        for (let i = 0; i < text.length; i += MAX_LENGTH) {
-          await sendTelegramMessage(
-            this.bot.api,
-            numericId,
-            text.slice(i, i + MAX_LENGTH),
-          );
-        }
+      for (const chunk of chunkText(text, 4096)) {
+        await sendTelegramMessage(this.bot.api, numericId, chunk);
       }
       logger.info({ jid, length: text.length }, 'Telegram message sent');
     } catch (err) {

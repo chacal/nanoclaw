@@ -4,7 +4,10 @@ import { EventEmitter } from 'events';
 
 // --- Mocks ---
 
-vi.mock('./registry.js', () => ({ registerChannel: vi.fn() }));
+vi.mock('./registry.js', async () => {
+  const actual = await vi.importActual('./registry.js');
+  return { ...actual, registerChannel: vi.fn() };
+});
 vi.mock('../env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',

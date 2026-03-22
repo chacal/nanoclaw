@@ -26,3 +26,13 @@ export function getChannelFactory(name: string): ChannelFactory | undefined {
 export function getRegisteredChannelNames(): string[] {
   return [...registry.keys()];
 }
+
+/** Split text into chunks of at most maxLength characters. */
+export function chunkText(text: string, maxLength: number): string[] {
+  if (text.length <= maxLength) return [text];
+  const chunks: string[] = [];
+  for (let i = 0; i < text.length; i += maxLength) {
+    chunks.push(text.slice(i, i + maxLength));
+  }
+  return chunks;
+}

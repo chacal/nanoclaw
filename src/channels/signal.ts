@@ -5,7 +5,7 @@ import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { transcribeAudio } from '../transcription.js';
-import { registerChannel, ChannelOpts } from './registry.js';
+import { registerChannel, chunkText, ChannelOpts } from './registry.js';
 import { Channel } from '../types.js';
 
 export class SignalChannel implements Channel {
@@ -304,6 +304,14 @@ export class SignalChannel implements Channel {
     });
   }
 
+  /** Build recipient/groupId params for an outbound RPC call. */
+  private recipientParams(jid: string): Record<string, any> {
+    const id = jid.replace(/^signal:/, '');
+    const isDirectRecipient =
+      id.startsWith('+') || /^[0-9a-f]{8}-[0-9a-f]{4}-/.test(id);
+    return isDirectRecipient ? { recipient: [id] } : { groupId: id };
+  }
+
   async sendMessage(jid: string, text: string): Promise<void> {
     if (!this.proc) {
       logger.warn('Signal not connected');
@@ -311,32 +319,14 @@ export class SignalChannel implements Channel {
     }
 
     try {
-      const id = jid.replace(/^signal:/, '');
-
-      // Signal has ~2000 char limit per message
-      const MAX_LENGTH = 2000;
-      const chunks =
-        text.length <= MAX_LENGTH
-          ? [text]
-          : Array.from(
-              { length: Math.ceil(text.length / MAX_LENGTH) },
-              (_, i) => text.slice(i * MAX_LENGTH, (i + 1) * MAX_LENGTH),
-            );
-
-      for (const chunk of chunks) {
+      for (const chunk of chunkText(text, 2000)) {
         const { text: plainText, styles } = parseFormatting(chunk);
-        const isPhone = id.startsWith('+');
-        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-/.test(id);
         const params: any = {
           message: plainText,
+          ...this.recipientParams(jid),
         };
         if (styles.length > 0) {
           params.textStyle = styles;
-        }
-        if (isPhone || isUuid) {
-          params.recipient = [id];
-        } else {
-          params.groupId = id;
         }
         await this.sendRpc('send', params);
       }
@@ -367,16 +357,7 @@ export class SignalChannel implements Channel {
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
     if (!this.proc || !isTyping) return;
     try {
-      const id = jid.replace(/^signal:/, '');
-      const isPhone = id.startsWith('+');
-      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-/.test(id);
-      const params: any = {};
-      if (isPhone || isUuid) {
-        params.recipient = [id];
-      } else {
-        params.groupId = id;
-      }
-      await this.sendRpc('sendTyping', params);
+      await this.sendRpc('sendTyping', this.recipientParams(jid));
     } catch {
       // Typing indicators are best-effort
     }
