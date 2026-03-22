@@ -169,6 +169,27 @@ export class SignalChannel implements Channel {
     // Build content: text message or voice transcription
     let content = text || '';
 
+    // Signal mentions replace the mentioned name with U+FFFC (object replacement
+    // character) in the message body. The actual mention data is in dataMessage.mentions.
+    // Reconstruct the text by replacing each placeholder with @name.
+    const mentions = dataMessage.mentions || [];
+    if (mentions.length > 0 && content) {
+      // Sort by start position descending so replacements don't shift indices
+      const sorted = [...mentions].sort(
+        (a: any, b: any) => (b.start ?? 0) - (a.start ?? 0),
+      );
+      for (const m of sorted) {
+        const start = m.start ?? 0;
+        const len = m.length ?? 1;
+        // Signal puts phone number or UUID as mention name — map our own
+        // number/UUID to the assistant name so the trigger pattern matches.
+        const isSelf = m.number === this.phoneNumber;
+        const name = isSelf ? ASSISTANT_NAME : (m.name || 'unknown');
+        content =
+          content.slice(0, start) + `@${name}` + content.slice(start + len);
+      }
+    }
+
     if (voiceFilePath) {
       const transcript = await transcribeAudio(
         voiceFilePath,
