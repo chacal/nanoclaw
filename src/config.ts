@@ -44,20 +44,25 @@ export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
-export const CONTAINER_TIMEOUT = parseInt(
-  process.env.CONTAINER_TIMEOUT || '1800000',
-  10,
+function safeInt(val: string | undefined, fallback: number): number {
+  const parsed = val ? parseInt(val, 10) : NaN;
+  return Number.isNaN(parsed) ? fallback : parsed;
+}
+
+export const CONTAINER_TIMEOUT = safeInt(
+  process.env.CONTAINER_TIMEOUT,
+  1800000,
 );
-export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
-  process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760',
-  10,
+export const CONTAINER_MAX_OUTPUT_SIZE = safeInt(
+  process.env.CONTAINER_MAX_OUTPUT_SIZE,
+  10485760,
 ); // 10MB default
-export const CREDENTIAL_PROXY_PORT = parseInt(
-  process.env.CREDENTIAL_PROXY_PORT || '3001',
-  10,
+export const CREDENTIAL_PROXY_PORT = safeInt(
+  process.env.CREDENTIAL_PROXY_PORT,
+  3001,
 );
 export const IPC_POLL_INTERVAL = 1000;
-export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
+export const IDLE_TIMEOUT = safeInt(process.env.IDLE_TIMEOUT, 1800000); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
   parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,
