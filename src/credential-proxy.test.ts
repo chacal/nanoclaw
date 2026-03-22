@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'fs';
 import http from 'http';
+import os from 'os';
+import path from 'path';
 import type { AddressInfo } from 'net';
 
 const mockEnv: Record<string, string> = {};
@@ -188,5 +191,101 @@ describe('credential-proxy', () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.body).toBe('Bad Gateway');
+  });
+
+  describe('OAuth credentials file', () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cred-proxy-test-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it('loads token from credentials file and injects it', async () => {
+      const credsFile = path.join(tmpDir, 'credentials.json');
+      fs.writeFileSync(
+        credsFile,
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: 'file-access-token',
+            refreshToken: 'file-refresh-token',
+            expiresAt: Date.now() + 3600_000, // 1 hour from now
+          },
+        }),
+      );
+
+      proxyPort = await startProxy({
+        CLAUDE_CREDENTIALS_FILE: credsFile,
+      });
+
+      await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/api/oauth/claude_cli/create_api_key',
+          headers: {
+            'content-type': 'application/json',
+            authorization: 'Bearer placeholder',
+          },
+        },
+        '{}',
+      );
+
+      expect(lastUpstreamHeaders['authorization']).toBe(
+        'Bearer file-access-token',
+      );
+    });
+
+    it('falls back to static token when credentials file is missing', async () => {
+      proxyPort = await startProxy({
+        CLAUDE_CODE_OAUTH_TOKEN: 'static-token',
+        CLAUDE_CREDENTIALS_FILE: path.join(tmpDir, 'nonexistent.json'),
+      });
+
+      await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/api/oauth/claude_cli/create_api_key',
+          headers: {
+            'content-type': 'application/json',
+            authorization: 'Bearer placeholder',
+          },
+        },
+        '{}',
+      );
+
+      expect(lastUpstreamHeaders['authorization']).toBe('Bearer static-token');
+    });
+
+    it('falls back to static token when credentials file has invalid schema', async () => {
+      const credsFile = path.join(tmpDir, 'credentials.json');
+      fs.writeFileSync(credsFile, JSON.stringify({ claudeAiOauth: {} }));
+
+      proxyPort = await startProxy({
+        CLAUDE_CODE_OAUTH_TOKEN: 'static-fallback',
+        CLAUDE_CREDENTIALS_FILE: credsFile,
+      });
+
+      await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/api/oauth/claude_cli/create_api_key',
+          headers: {
+            'content-type': 'application/json',
+            authorization: 'Bearer placeholder',
+          },
+        },
+        '{}',
+      );
+
+      expect(lastUpstreamHeaders['authorization']).toBe(
+        'Bearer static-fallback',
+      );
+    });
   });
 });
