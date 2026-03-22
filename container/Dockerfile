@@ -48,6 +48,10 @@ COPY agent-runner/ ./
 # Build TypeScript
 RUN npm run build
 
+# Install ha-api helper for direct Home Assistant REST API access
+COPY ha-api.sh /usr/local/bin/ha-api
+RUN chmod +x /usr/local/bin/ha-api
+
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
 
