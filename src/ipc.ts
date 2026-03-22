@@ -75,7 +75,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && data.text) {
+              if (
+                data.type === 'message' &&
+                typeof data.chatJid === 'string' &&
+                typeof data.text === 'string'
+              ) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
                 if (
@@ -196,10 +200,10 @@ export async function processTaskIpc(
   switch (data.type) {
     case 'schedule_task':
       if (
-        data.prompt &&
-        data.schedule_type &&
-        data.schedule_value &&
-        data.targetJid
+        typeof data.prompt === 'string' &&
+        typeof data.schedule_type === 'string' &&
+        typeof data.schedule_value === 'string' &&
+        typeof data.targetJid === 'string'
       ) {
         // Resolve the target group from JID
         const targetJid = data.targetJid as string;
