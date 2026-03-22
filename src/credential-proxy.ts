@@ -33,6 +33,15 @@ const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const OAUTH_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token';
 const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000; // Refresh 5 minutes before expiry
 
+// Only allow API paths that containers legitimately need.
+// Blocks access to billing, admin, and other sensitive endpoints.
+const ALLOWED_PATH_PREFIXES = [
+  '/v1/messages',
+  '/v1/completions',
+  '/api/oauth/claude_cli/',
+  '/api/auth/',
+];
+
 interface OAuthCredentials {
   accessToken: string;
   refreshToken: string;
@@ -106,6 +115,7 @@ async function refreshOAuthToken(
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(body),
         },
+        timeout: 30_000,
       },
       (res) => {
         const chunks: Buffer[] = [];
@@ -135,6 +145,9 @@ async function refreshOAuthToken(
     );
 
     req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy(new Error('OAuth token refresh timed out'));
+    });
     req.write(body);
     req.end();
   });
@@ -229,6 +242,14 @@ export function startCredentialProxy(
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', async () => {
+        const reqPath = req.url || '/';
+        if (!ALLOWED_PATH_PREFIXES.some((p) => reqPath.startsWith(p))) {
+          logger.warn({ path: reqPath }, 'Blocked request to disallowed path');
+          res.writeHead(403);
+          res.end('Forbidden');
+          return;
+        }
+
         const body = Buffer.concat(chunks);
         const headers: Record<string, string | number | string[] | undefined> =
           {
