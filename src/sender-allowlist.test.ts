@@ -79,26 +79,29 @@ describe('loadSenderAllowlist', () => {
     expect(cfg.chats['group-a'].mode).toBe('drop');
   });
 
-  it('returns allow-all on invalid JSON', () => {
+  it('fails closed on invalid JSON', () => {
     const p = cfgPath();
     fs.writeFileSync(p, '{ not valid json }}}');
     const cfg = loadSenderAllowlist(p);
-    expect(cfg.default.allow).toBe('*');
+    expect(cfg.default.allow).toEqual([]);
+    expect(cfg.default.mode).toBe('drop');
   });
 
-  it('returns allow-all on invalid schema', () => {
+  it('fails closed on invalid schema', () => {
     const p = writeConfig({ default: { oops: true } });
     const cfg = loadSenderAllowlist(p);
-    expect(cfg.default.allow).toBe('*');
+    expect(cfg.default.allow).toEqual([]);
+    expect(cfg.default.mode).toBe('drop');
   });
 
-  it('rejects non-string allow array items', () => {
+  it('fails closed on non-string allow array items', () => {
     const p = writeConfig({
       default: { allow: [123, null, true], mode: 'trigger' },
       chats: {},
     });
     const cfg = loadSenderAllowlist(p);
-    expect(cfg.default.allow).toBe('*'); // falls back to default
+    expect(cfg.default.allow).toEqual([]);
+    expect(cfg.default.mode).toBe('drop');
   });
 
   it('skips invalid per-chat entries', () => {

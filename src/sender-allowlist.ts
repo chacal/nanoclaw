@@ -20,6 +20,14 @@ const DEFAULT_CONFIG: SenderAllowlistConfig = {
   logDenied: true,
 };
 
+// Fail-closed config: used when the file exists but is unreadable or malformed.
+// Denies all senders to prevent silent bypass of access control.
+const DENY_ALL_CONFIG: SenderAllowlistConfig = {
+  default: { allow: [], mode: 'drop' },
+  chats: {},
+  logDenied: true,
+};
+
 function isValidEntry(entry: unknown): entry is ChatAllowlistEntry {
   if (!entry || typeof entry !== 'object') return false;
   const e = entry as Record<string, unknown>;
@@ -40,29 +48,32 @@ export function loadSenderAllowlist(
     raw = fs.readFileSync(filePath, 'utf-8');
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return DEFAULT_CONFIG;
-    logger.warn(
+    logger.error(
       { err, path: filePath },
-      'sender-allowlist: cannot read config',
+      'sender-allowlist: cannot read config — failing closed (denying all)',
     );
-    return DEFAULT_CONFIG;
+    return DENY_ALL_CONFIG;
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    logger.warn({ path: filePath }, 'sender-allowlist: invalid JSON');
-    return DEFAULT_CONFIG;
+    logger.error(
+      { path: filePath },
+      'sender-allowlist: invalid JSON — failing closed (denying all)',
+    );
+    return DENY_ALL_CONFIG;
   }
 
   const obj = parsed as Record<string, unknown>;
 
   if (!isValidEntry(obj.default)) {
-    logger.warn(
+    logger.error(
       { path: filePath },
-      'sender-allowlist: invalid or missing default entry',
+      'sender-allowlist: invalid or missing default entry — failing closed (denying all)',
     );
-    return DEFAULT_CONFIG;
+    return DENY_ALL_CONFIG;
   }
 
   const chats: Record<string, ChatAllowlistEntry> = {};
