@@ -196,7 +196,7 @@ export class SignalChannel implements Channel {
         // Signal puts phone number or UUID as mention name — map our own
         // number/UUID to the assistant name so the trigger pattern matches.
         const isSelf = m.number === this.phoneNumber;
-        const name = isSelf ? ASSISTANT_NAME : (m.name || 'unknown');
+        const name = isSelf ? ASSISTANT_NAME : m.name || 'unknown';
         content =
           content.slice(0, start) + `@${name}` + content.slice(start + len);
       }
