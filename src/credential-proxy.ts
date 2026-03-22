@@ -15,6 +15,7 @@
  * point to a Claude credentials.json file for automatic token refresh.
  */
 import fs from 'fs';
+import path from 'path';
 import { createServer, Server } from 'http';
 import { request as httpsRequest } from 'https';
 import { request as httpRequest, RequestOptions } from 'http';
@@ -62,10 +63,7 @@ function loadCredentialsFile(filePath: string): OAuthCredentials | null {
   }
 }
 
-function saveCredentialsFile(
-  filePath: string,
-  creds: OAuthCredentials,
-): void {
+function saveCredentialsFile(filePath: string, creds: OAuthCredentials): void {
   try {
     // Read existing file to preserve other fields
     let data: Record<string, any> = {};
@@ -80,7 +78,10 @@ function saveCredentialsFile(
       refreshToken: creds.refreshToken,
       expiresAt: creds.expiresAt,
     };
-    fs.writeFileSync(filePath, JSON.stringify(data) + '\n');
+    // Atomic write: write to temp file then rename to prevent corruption on crash
+    const tmpFile = filePath + `.tmp.${process.pid}`;
+    fs.writeFileSync(tmpFile, JSON.stringify(data) + '\n');
+    fs.renameSync(tmpFile, filePath);
     logger.info('OAuth credentials saved to file');
   } catch (err) {
     logger.error({ err }, 'Failed to save credentials file');
