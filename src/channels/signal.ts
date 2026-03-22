@@ -1,4 +1,5 @@
 import { ChildProcess, spawn } from 'child_process';
+import path from 'path';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
@@ -118,7 +119,9 @@ export class SignalChannel implements Channel {
 
     // JSON-RPC notification (incoming message)
     if (msg.method === 'receive') {
-      this.handleNotification(msg.params);
+      this.handleNotification(msg.params).catch((err) => {
+        logger.error({ err }, 'Unhandled error in Signal notification handler');
+      });
     }
   }
 
@@ -137,9 +140,18 @@ export class SignalChannel implements Channel {
     const voiceAttachment = attachments.find(
       (a: any) => a.contentType?.startsWith('audio/') && a.id,
     );
-    const voiceFilePath = voiceAttachment
-      ? `${ATTACHMENTS_DIR}/${voiceAttachment.id}`
-      : null;
+    let voiceFilePath: string | null = null;
+    if (voiceAttachment) {
+      const resolved = path.resolve(ATTACHMENTS_DIR, voiceAttachment.id);
+      if (resolved.startsWith(ATTACHMENTS_DIR + path.sep)) {
+        voiceFilePath = resolved;
+      } else {
+        logger.warn(
+          { id: voiceAttachment.id },
+          'Attachment ID escapes attachments directory, ignoring',
+        );
+      }
+    }
 
     const text = dataMessage.message;
     if (!text && !voiceFilePath) return; // Skip if no text and no voice
