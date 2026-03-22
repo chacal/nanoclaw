@@ -77,6 +77,8 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+// Typing intervals for piped messages (message loop path). Cleared when agent output arrives.
+const pipeTypingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -263,7 +265,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   try {
     const output = await runAgent(group, prompt, chatJid, async (result) => {
-      // Streaming output callback — called for each agent result
+      // Streaming output callback — called for each agent result.
+      // Clear pipe typing interval on any output (agent is responding).
+      if (pipeTypingIntervals.has(chatJid)) {
+        clearInterval(pipeTypingIntervals.get(chatJid)!);
+        pipeTypingIntervals.delete(chatJid);
+      }
+
       if (result.result) {
         const raw =
           typeof result.result === 'string'
@@ -274,6 +282,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
         if (text) {
           clearInterval(typingInterval);
+          await channel.setTyping?.(chatJid, false);
           await channel.sendMessage(chatJid, text);
           outputSentToUser = true;
         }
@@ -508,12 +517,19 @@ async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
-            // Show typing indicator while the container processes the piped message
-            channel
-              .setTyping?.(chatJid, true)
-              ?.catch((err) =>
-                logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-              );
+            // Show typing indicator while the container processes the piped message.
+            // Refresh every 10s — Signal auto-expires typing after ~15s.
+            // Cleared when agent output arrives (see pipeTypingIntervals in processGroupMessages).
+            channel.setTyping?.(chatJid, true)?.catch(() => {});
+            if (pipeTypingIntervals.has(chatJid)) {
+              clearInterval(pipeTypingIntervals.get(chatJid)!);
+            }
+            pipeTypingIntervals.set(
+              chatJid,
+              setInterval(() => {
+                channel.setTyping?.(chatJid, true)?.catch(() => {});
+              }, 10_000),
+            );
           } else {
             // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);
