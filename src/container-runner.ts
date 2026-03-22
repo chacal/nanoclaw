@@ -237,6 +237,16 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Google Workspace CLI credentials (read-only, shared across all groups)
+  const gwsCredsDir = path.join(DATA_DIR, 'secrets');
+  if (fs.existsSync(path.join(gwsCredsDir, 'gws-credentials.json'))) {
+    mounts.push({
+      hostPath: gwsCredsDir,
+      containerPath: '/workspace/secrets',
+      readonly: true,
+    });
+  }
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
@@ -258,6 +268,12 @@ function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Google Workspace CLI credentials path
+  args.push(
+    '-e',
+    'GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=/workspace/secrets/gws-credentials.json',
+  );
 
   // Route API traffic through the credential proxy (containers never see real secrets)
   args.push(
