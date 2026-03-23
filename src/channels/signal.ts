@@ -91,9 +91,38 @@ export class SignalChannel implements Channel {
           console.log(`\n  Signal: ${this.phoneNumber}`);
           console.log(`  Send a message to this number to start chatting\n`);
           resolve();
+          // Pre-populate name cache from known contacts (best-effort)
+          this.prefillNameCache().catch((err) => {
+            logger.debug({ err }, 'Failed to prefill Signal name cache');
+          });
         }
       }, 1000);
     });
+  }
+
+  /**
+   * Fetch known contacts from signal-cli and populate the name cache so that
+   * mentions can be resolved to display names immediately after startup.
+   */
+  private async prefillNameCache(): Promise<void> {
+    const contacts: any[] = await this.sendRpc('listContacts', {});
+    if (!Array.isArray(contacts)) return;
+    let count = 0;
+    for (const c of contacts) {
+      const name = c.profileName || c.name;
+      if (!name) continue;
+      if (c.number && name !== c.number) {
+        this.nameCache.set(c.number, name);
+        count++;
+      }
+      if (c.uuid && name !== c.uuid) {
+        this.nameCache.set(c.uuid, name);
+        count++;
+      }
+    }
+    if (count > 0) {
+      logger.info({ entries: count }, 'Signal name cache prefilled from contacts');
+    }
   }
 
   private handleLine(line: string): void {
