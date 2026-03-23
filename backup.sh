@@ -50,6 +50,8 @@ RSYNC_EXCLUDES=(
   "data/sessions/*/.claude/plugins/"
   "data/sessions/*/agent-runner-src/"
   "data/sessions/*/.claude/skills/"
+  "data/sessions/*/.claude/projects/*/subagents/"
+  "data/sessions/*/.claude/projects/*/tool-results/"
 )
 
 # Auto-exclude all Git-tracked files (they're restored by git clone)
