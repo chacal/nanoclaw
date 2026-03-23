@@ -638,6 +638,294 @@ describe('SignalChannel', () => {
     });
   });
 
+  describe('mention name cache', () => {
+    async function connectChannel() {
+      const testOpts = createTestOpts();
+      const channel = new SignalChannel('+15559999999', 'signal-cli', testOpts);
+      const connectPromise = channel.connect();
+      vi.advanceTimersByTime(1000);
+      await connectPromise;
+      return { channel, opts: testOpts };
+    }
+
+    it('resolves phone-number mention name from cache', async () => {
+      const { opts } = await connectChannel();
+
+      // First message from Jouni populates the name cache
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15550000000',
+            sourceName: 'Jouni',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: 'hello everyone',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+            },
+          },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Second message from Alice mentions Jouni, but m.name is a phone number
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15551234567',
+            sourceName: 'Alice',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: 'hey \uFFFC check this',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+              mentions: [
+                {
+                  name: '+15550000000',
+                  number: '+15550000000',
+                  start: 4,
+                  length: 1,
+                },
+              ],
+            },
+          },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenLastCalledWith(
+        'signal:test-group-id',
+        expect.objectContaining({
+          content: 'hey @Jouni check this',
+        }),
+      );
+    });
+
+    it('falls back to phone number when cache has no entry', async () => {
+      const { opts } = await connectChannel();
+
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15551234567',
+            sourceName: 'Alice',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: 'hey \uFFFC check this',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+              mentions: [
+                {
+                  name: '+15550000000',
+                  number: '+15550000000',
+                  start: 4,
+                  length: 1,
+                },
+              ],
+            },
+          },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'signal:test-group-id',
+        expect.objectContaining({
+          content: 'hey @+15550000000 check this',
+        }),
+      );
+    });
+
+    it('uses real name from m.name without consulting cache', async () => {
+      const { opts } = await connectChannel();
+
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15551234567',
+            sourceName: 'Alice',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: 'hey \uFFFC check this',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+              mentions: [
+                {
+                  name: 'Bob',
+                  number: '+15550000000',
+                  start: 4,
+                  length: 1,
+                },
+              ],
+            },
+          },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'signal:test-group-id',
+        expect.objectContaining({
+          content: 'hey @Bob check this',
+        }),
+      );
+    });
+
+    it('resolves UUID-based mention from cache', async () => {
+      const { opts } = await connectChannel();
+      const uuid = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+
+      // Message from user identified by UUID populates cache
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15550000000',
+            sourceUuid: uuid,
+            sourceName: 'Oona',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: 'hi!',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+            },
+          },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Mention by UUID
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15551234567',
+            sourceName: 'Alice',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: '\uFFFC hello',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+              mentions: [
+                {
+                  name: uuid,
+                  number: '+15550000000',
+                  uuid,
+                  start: 0,
+                  length: 1,
+                },
+              ],
+            },
+          },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenLastCalledWith(
+        'signal:test-group-id',
+        expect.objectContaining({
+          content: '@Oona hello',
+        }),
+      );
+    });
+
+    it('prefills cache from listContacts on connect', async () => {
+      const testOpts = createTestOpts();
+      const channel = new SignalChannel('+15559999999', 'signal-cli', testOpts);
+      const connectPromise = channel.connect();
+      vi.advanceTimersByTime(1000);
+      await connectPromise;
+
+      // connect() fires prefillNameCache which sends a listContacts RPC
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Read the RPC request written to stdin
+      const written: string[] = [];
+      fakeProc.stdin.on('data', (chunk: Buffer) =>
+        written.push(chunk.toString()),
+      );
+      // The prefill RPC was already written; drain remaining
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Find the listContacts RPC and respond
+      const stdinData = fakeProc.stdin.read();
+      // The RPC was written during connect; respond to it
+      // We need to find the id — parse any pending RPC
+      // Since prefillNameCache calls sendRpc, there should be a pending request
+      // Let's respond with contacts data
+      emitJsonLine(fakeProc, {
+        id: 1,
+        result: [
+          {
+            number: '+15550000000',
+            uuid: 'aaaa-bbbb-cccc',
+            profileName: 'Jouni Hartikainen',
+          },
+          {
+            number: '+15550000001',
+            name: 'Venla',
+          },
+          {
+            number: '+15550000002',
+            // No name — should be skipped
+          },
+        ],
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Now send a message mentioning Jouni by phone number
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15551234567',
+            sourceName: 'Alice',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: '\uFFFC hello',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+              mentions: [
+                {
+                  name: '+15550000000',
+                  number: '+15550000000',
+                  start: 0,
+                  length: 1,
+                },
+              ],
+            },
+          },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(testOpts.onMessage).toHaveBeenCalledWith(
+        'signal:test-group-id',
+        expect.objectContaining({
+          content: '@Jouni Hartikainen hello',
+        }),
+      );
+    });
+  });
+
   // --- sendMessage ---
 
   describe('sendMessage', () => {
@@ -647,6 +935,11 @@ describe('SignalChannel', () => {
       const connectPromise = channel.connect();
       vi.advanceTimersByTime(1000);
       await connectPromise;
+      // Resolve the prefillNameCache listContacts RPC and drain stdin
+      await vi.advanceTimersByTimeAsync(0);
+      emitJsonLine(fakeProc, { id: 1, result: [] });
+      await vi.advanceTimersByTimeAsync(0);
+      fakeProc.stdin.read();
       return { channel, proc: fakeProc };
     }
 
@@ -749,6 +1042,11 @@ describe('SignalChannel', () => {
       const connectPromise = channel.connect();
       vi.advanceTimersByTime(1000);
       await connectPromise;
+      // Resolve the prefillNameCache listContacts RPC and drain stdin
+      await vi.advanceTimersByTimeAsync(0);
+      emitJsonLine(fakeProc, { id: 1, result: [] });
+      await vi.advanceTimersByTimeAsync(0);
+      fakeProc.stdin.read();
       return { channel, proc: fakeProc };
     }
 
