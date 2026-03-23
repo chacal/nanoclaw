@@ -638,6 +638,214 @@ describe('SignalChannel', () => {
     });
   });
 
+  describe('mention name cache', () => {
+    async function connectChannel() {
+      const testOpts = createTestOpts();
+      const channel = new SignalChannel('+15559999999', 'signal-cli', testOpts);
+      const connectPromise = channel.connect();
+      vi.advanceTimersByTime(1000);
+      await connectPromise;
+      return { channel, opts: testOpts };
+    }
+
+    it('resolves phone-number mention name from cache', async () => {
+      const { opts } = await connectChannel();
+
+      // First message from Jouni populates the name cache
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15550000000',
+            sourceName: 'Jouni',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: 'hello everyone',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+            },
+          },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Second message from Alice mentions Jouni, but m.name is a phone number
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15551234567',
+            sourceName: 'Alice',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: 'hey \uFFFC check this',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+              mentions: [
+                {
+                  name: '+15550000000',
+                  number: '+15550000000',
+                  start: 4,
+                  length: 1,
+                },
+              ],
+            },
+          },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenLastCalledWith(
+        'signal:test-group-id',
+        expect.objectContaining({
+          content: 'hey @Jouni check this',
+        }),
+      );
+    });
+
+    it('falls back to phone number when cache has no entry', async () => {
+      const { opts } = await connectChannel();
+
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15551234567',
+            sourceName: 'Alice',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: 'hey \uFFFC check this',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+              mentions: [
+                {
+                  name: '+15550000000',
+                  number: '+15550000000',
+                  start: 4,
+                  length: 1,
+                },
+              ],
+            },
+          },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'signal:test-group-id',
+        expect.objectContaining({
+          content: 'hey @+15550000000 check this',
+        }),
+      );
+    });
+
+    it('uses real name from m.name without consulting cache', async () => {
+      const { opts } = await connectChannel();
+
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15551234567',
+            sourceName: 'Alice',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: 'hey \uFFFC check this',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+              mentions: [
+                {
+                  name: 'Bob',
+                  number: '+15550000000',
+                  start: 4,
+                  length: 1,
+                },
+              ],
+            },
+          },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'signal:test-group-id',
+        expect.objectContaining({
+          content: 'hey @Bob check this',
+        }),
+      );
+    });
+
+    it('resolves UUID-based mention from cache', async () => {
+      const { opts } = await connectChannel();
+      const uuid = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+
+      // Message from user identified by UUID populates cache
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15550000000',
+            sourceUuid: uuid,
+            sourceName: 'Oona',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: 'hi!',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+            },
+          },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Mention by UUID
+      emitJsonLine(fakeProc, {
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15551234567',
+            sourceName: 'Alice',
+            timestamp: Date.now(),
+            dataMessage: {
+              message: '\uFFFC hello',
+              groupInfo: {
+                groupId: 'test-group-id',
+                groupName: 'Signal Group',
+              },
+              mentions: [
+                {
+                  name: uuid,
+                  number: '+15550000000',
+                  uuid,
+                  start: 0,
+                  length: 1,
+                },
+              ],
+            },
+          },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenLastCalledWith(
+        'signal:test-group-id',
+        expect.objectContaining({
+          content: '@Oona hello',
+        }),
+      );
+    });
+  });
+
   // --- sendMessage ---
 
   describe('sendMessage', () => {

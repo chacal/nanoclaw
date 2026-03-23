@@ -22,6 +22,8 @@ export class SignalChannel implements Channel {
     { resolve: (v: any) => void; reject: (e: Error) => void }
   >();
   private lineBuffer = '';
+  /** Maps phone numbers and UUIDs to display names from previously seen messages. */
+  private nameCache = new Map<string, string>();
 
   constructor(phoneNumber: string, signalCliPath: string, opts: ChannelOpts) {
     this.phoneNumber = phoneNumber;
@@ -164,6 +166,15 @@ export class SignalChannel implements Channel {
     const sourceName = envelope.sourceName || source;
     const timestamp = new Date(envelope.timestamp || Date.now()).toISOString();
 
+    // Cache sender name so we can resolve mentions by phone number or UUID
+    if (sourceName && sourceName !== source) {
+      this.nameCache.set(source, sourceName);
+    }
+    const sourceUuid = envelope.sourceUuid;
+    if (sourceUuid && sourceName && sourceName !== sourceUuid) {
+      this.nameCache.set(sourceUuid, sourceName);
+    }
+
     // Determine if group or 1:1
     const groupInfo = dataMessage.groupInfo;
     const isGroup = !!groupInfo;
@@ -197,7 +208,7 @@ export class SignalChannel implements Channel {
         // Signal puts phone number or UUID as mention name — map our own
         // number/UUID to the assistant name so the trigger pattern matches.
         const isSelf = m.number === this.phoneNumber;
-        const name = isSelf ? ASSISTANT_NAME : m.name || 'unknown';
+        const name = isSelf ? ASSISTANT_NAME : this.resolveMentionName(m);
         content =
           content.slice(0, start) + `@${name}` + content.slice(start + len);
       }
@@ -268,6 +279,29 @@ export class SignalChannel implements Channel {
       { chatJid, chatName, sender: sourceName },
       'Signal message stored',
     );
+  }
+
+  /**
+   * Resolve a mention to a display name.  signal-cli often puts the phone
+   * number or UUID into the `name` field — look up a real name from the cache
+   * built from previously seen messages.
+   */
+  private resolveMentionName(mention: any): string {
+    const { name, number: num, uuid } = mention;
+    // If signal-cli already provided a real name (not a phone number/UUID), use it
+    if (name && !name.startsWith('+') && !/^[0-9a-f]{8}-/.test(name)) {
+      return name;
+    }
+    // Try cache lookup by phone number, then UUID
+    if (num) {
+      const cached = this.nameCache.get(num);
+      if (cached) return cached;
+    }
+    if (uuid) {
+      const cached = this.nameCache.get(uuid);
+      if (cached) return cached;
+    }
+    return name || 'unknown';
   }
 
   private sendRpc(method: string, params: any): Promise<any> {
