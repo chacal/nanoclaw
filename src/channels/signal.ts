@@ -121,7 +121,10 @@ export class SignalChannel implements Channel {
       }
     }
     if (count > 0) {
-      logger.info({ entries: count }, 'Signal name cache prefilled from contacts');
+      logger.info(
+        { entries: count },
+        'Signal name cache prefilled from contacts',
+      );
     }
   }
 
