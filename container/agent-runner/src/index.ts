@@ -57,6 +57,50 @@ interface SDKUserMessage {
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
+const IPC_WATCH_FALLBACK_MS = 2000; // Fallback poll interval when fs.watch is unavailable
+
+// Use fs.watch to detect IPC file changes instantly, with polling fallback.
+// Returns a function that waits for the next filesystem event in the IPC directory.
+let ipcWatcher: fs.FSWatcher | null = null;
+let ipcWatchCallbacks: Array<() => void> = [];
+
+function initIpcWatcher(): void {
+  try {
+    ipcWatcher = fs.watch(IPC_INPUT_DIR, () => {
+      const cbs = ipcWatchCallbacks;
+      ipcWatchCallbacks = [];
+      for (const cb of cbs) cb();
+    });
+    ipcWatcher.on('error', () => {
+      // fs.watch can fail on some filesystems — fall back to polling
+      ipcWatcher?.close();
+      ipcWatcher = null;
+    });
+  } catch {
+    ipcWatcher = null;
+  }
+}
+
+/** Wait for an IPC directory change. Resolves on fs.watch event or fallback timeout. */
+function waitForIpcEvent(): Promise<void> {
+  return new Promise((resolve) => {
+    if (ipcWatcher) {
+      // fs.watch available — wake on event, with safety timeout
+      const timer = setTimeout(() => {
+        ipcWatchCallbacks = ipcWatchCallbacks.filter((cb) => cb !== resolve);
+        resolve();
+      }, IPC_WATCH_FALLBACK_MS);
+      const cb = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      ipcWatchCallbacks.push(cb);
+    } else {
+      // No fs.watch — fall back to polling
+      setTimeout(resolve, IPC_POLL_MS);
+    }
+  });
+}
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -305,22 +349,13 @@ function drainIpcInput(): string[] {
  * Wait for a new IPC message or _close sentinel.
  * Returns the messages as a single string, or null if _close.
  */
-function waitForIpcMessage(): Promise<string | null> {
-  return new Promise((resolve) => {
-    const poll = () => {
-      if (shouldClose()) {
-        resolve(null);
-        return;
-      }
-      const messages = drainIpcInput();
-      if (messages.length > 0) {
-        resolve(messages.join('\n'));
-        return;
-      }
-      setTimeout(poll, IPC_POLL_MS);
-    };
-    poll();
-  });
+async function waitForIpcMessage(): Promise<string | null> {
+  while (true) {
+    if (shouldClose()) return null;
+    const messages = drainIpcInput();
+    if (messages.length > 0) return messages.join('\n');
+    await waitForIpcEvent();
+  }
 }
 
 /**
@@ -343,23 +378,24 @@ async function runQuery(
   // Poll IPC for follow-up messages and _close sentinel during the query
   let ipcPolling = true;
   let closedDuringQuery = false;
-  const pollIpcDuringQuery = () => {
-    if (!ipcPolling) return;
-    if (shouldClose()) {
-      log('Close sentinel detected during query, ending stream');
-      closedDuringQuery = true;
-      stream.end();
-      ipcPolling = false;
-      return;
+  const pollIpcDuringQuery = async () => {
+    while (ipcPolling) {
+      if (shouldClose()) {
+        log('Close sentinel detected during query, ending stream');
+        closedDuringQuery = true;
+        stream.end();
+        ipcPolling = false;
+        return;
+      }
+      const messages = drainIpcInput();
+      for (const text of messages) {
+        log(`Piping IPC message into active query (${text.length} chars)`);
+        stream.push(text);
+      }
+      await waitForIpcEvent();
     }
-    const messages = drainIpcInput();
-    for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
-    }
-    setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
-  setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
+  pollIpcDuringQuery();
 
   let newSessionId: string | undefined;
   let lastAssistantUuid: string | undefined;
@@ -465,6 +501,7 @@ async function runQuery(
 }
 
 async function main(): Promise<void> {
+  initIpcWatcher();
   let containerInput: ContainerInput;
 
   try {

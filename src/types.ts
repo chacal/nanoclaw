@@ -30,6 +30,7 @@ export interface AllowedRoot {
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
+  model?: string; // Override the default model for this group (e.g., 'claude-haiku-4-5-20251001')
 }
 
 export interface RegisteredGroup {

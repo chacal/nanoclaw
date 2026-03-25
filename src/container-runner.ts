@@ -145,8 +145,9 @@ function buildVolumeMounts(
     },
     enableAllProjectMcpServers: true,
   };
-  if (CLAUDE_CODE_MODEL) {
-    settings.model = CLAUDE_CODE_MODEL;
+  const model = group.containerConfig?.model || CLAUDE_CODE_MODEL;
+  if (model) {
+    settings.model = model;
   }
   fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
 

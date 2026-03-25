@@ -79,6 +79,8 @@ let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 // Typing intervals for piped messages (message loop path). Cleared when agent output arrives.
 const pipeTypingIntervals = new Map<string, ReturnType<typeof setInterval>>();
+// Wake the message loop immediately when a new message arrives (avoids polling delay).
+let wakeMessageLoop: (() => void) | null = null;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -539,7 +541,19 @@ async function startMessageLoop(): Promise<void> {
     } catch (err) {
       logger.error({ err }, 'Error in message loop');
     }
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
+    // Wait for a new message notification or poll timeout (whichever comes first).
+    // This eliminates the average 1s polling delay when messages arrive.
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        wakeMessageLoop = null;
+        resolve();
+      }, POLL_INTERVAL);
+      wakeMessageLoop = () => {
+        clearTimeout(timer);
+        wakeMessageLoop = null;
+        resolve();
+      };
+    });
   }
 }
 
@@ -661,6 +675,8 @@ async function main(): Promise<void> {
         }
       }
       storeMessage(msg);
+      // Wake the message loop immediately instead of waiting for next poll tick
+      wakeMessageLoop?.();
     },
     onChatMetadata: (
       chatJid: string,
