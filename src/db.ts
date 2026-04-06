@@ -145,8 +145,13 @@ export function initDatabase(): void {
   const dbPath = path.join(STORE_DIR, 'messages.db');
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
-  db = new Database(dbPath);
-  createSchema(db);
+  try {
+    db = new Database(dbPath);
+    createSchema(db);
+  } catch (err) {
+    logger.fatal({ err, dbPath }, 'Failed to initialize database');
+    throw err;
+  }
 
   // Migrate from JSON files if they exist
   migrateJsonState();
