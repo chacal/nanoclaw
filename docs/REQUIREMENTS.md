@@ -1,6 +1,6 @@
 # NanoClaw Requirements
 
-Original requirements and design decisions from the project creator.
+Original requirements and design decisions from the project creator. **Note:** This document reflects the initial vision. The project has since evolved — Signal and Telegram are now built into core, and the system runs on Linux as well as macOS.
 
 ---
 
@@ -24,7 +24,7 @@ Instead of application-level permission systems trying to prevent agents from ac
 
 ### Built for One User
 
-This isn't a framework or a platform. It's working software for my specific needs. I use WhatsApp and Email, so it supports WhatsApp and Email. I don't use Telegram, so it doesn't support Telegram. I add the integrations I actually want, not every possible integration.
+This isn't a framework or a platform. It's working software for my specific needs. I add the integrations I actually want, not every possible integration.
 
 ### Customization = Code Changes
 

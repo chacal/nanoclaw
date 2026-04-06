@@ -247,13 +247,13 @@ ANTHROPIC_API_KEY=proxy-managed
 EOF
 mkdir -p data/env && cp .env data/env/env
 
-# Authenticate (choose one):
-
-# QR code — scan with WhatsApp camera:
-npx tsx src/whatsapp-auth.ts
-
-# OR pairing code — enter code in WhatsApp > Linked Devices > Link with phone number:
-npx tsx src/whatsapp-auth.ts --pairing-code --phone <phone-number-no-plus>
+# Authenticate your channel:
+# Note: WhatsApp is now a separate skill (/add-whatsapp). Signal and Telegram are built-in.
+# For Telegram: set TELEGRAM_BOT_TOKEN in .env
+# For Signal: ensure signal-cli is configured
+# For WhatsApp: run /add-whatsapp skill first, then:
+# npx tsx src/whatsapp-auth.ts (QR code) or
+# npx tsx src/whatsapp-auth.ts --pairing-code --phone <number> (pairing code)
 
 # Register your chat (JID = your phone number + @s.whatsapp.net)
 npx tsx setup/index.ts --step register \

@@ -4,7 +4,7 @@ Personal Claude assistant. See [README.md](README.md) for philosophy and setup. 
 
 ## Quick Context
 
-Single Node.js process with skill-based channel system. Channels (WhatsApp, Telegram, Slack, Discord, Gmail) are skills that self-register at startup. Messages route to Claude Agent SDK running in containers (Linux VMs). Each group has isolated filesystem and memory.
+Single Node.js process. Signal and Telegram channels are built into core; additional channels (WhatsApp, Slack, Discord, Gmail) can be added via skills. Channels self-register at startup — the orchestrator connects whichever ones have credentials present. Messages route to Claude Agent SDK running in Docker containers (Linux VMs). Each group has isolated filesystem and memory. Credential proxy ensures API tokens never enter containers.
 
 ## Key Files
 
@@ -12,14 +12,38 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 |------|---------|
 | `src/index.ts` | Orchestrator: state, message loop, agent invocation |
 | `src/channels/registry.ts` | Channel registry (self-registration at startup) |
+| `src/channels/signal.ts` | Signal channel implementation |
+| `src/channels/telegram.ts` | Telegram channel implementation |
 | `src/ipc.ts` | IPC watcher and task processing |
 | `src/router.ts` | Message formatting and outbound routing |
 | `src/config.ts` | Trigger pattern, paths, intervals |
 | `src/container-runner.ts` | Spawns agent containers with mounts |
+| `src/container-runtime.ts` | Container runtime management (Docker/Apple Container) |
+| `src/credential-proxy.ts` | HTTP proxy that injects API credentials into container requests |
+| `src/group-queue.ts` | Per-group message queue with global concurrency limit |
+| `src/mount-security.ts` | Mount allowlist validation for containers |
+| `src/sender-allowlist.ts` | Per-group sender filtering |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
 | `src/db.ts` | SQLite operations |
-| `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
-| `container/skills/agent-browser.md` | Browser automation tool (available to all agents via Bash) |
+| `src/voice-api.ts` | Voice transcription HTTP endpoint |
+| `src/transcription.ts` | OpenAI audio transcription (gpt-4o-transcribe / whisper-1) |
+| `src/session-commands.ts` | Session management commands (/compact, /clear) |
+| `src/remote-control.ts` | Remote agent control |
+| `groups/{name}/CLAUDE.md` | Per-group agent memory (isolated) |
+| `groups/global/CLAUDE.md` | Global agent memory (read by all groups) |
+| `container/agent-runner/` | Code that runs inside the container (agent loop, IPC) |
+| `container/skills/` | Skills available to all agents (browser, capabilities, status) |
+
+## Features
+
+- **Multi-channel**: Signal and Telegram built-in; WhatsApp, Slack, Discord, Gmail via skills
+- **Container isolation**: Agents run in Docker containers with filesystem isolation
+- **Credential proxy**: API tokens never enter containers; injected via HTTP proxy
+- **Image vision**: Agents can see images sent via Telegram and Signal
+- **Voice transcription**: Voice messages transcribed via OpenAI (gpt-4o-transcribe, whisper-1 fallback)
+- **Agent swarms**: Teams of specialized agents that collaborate (Telegram)
+- **Scheduled tasks**: Recurring/one-time jobs that run as full agents
+- **Web access**: Search and fetch content; browser automation via agent-browser
 
 ## Skills
 
@@ -54,6 +78,13 @@ systemctl --user start nanoclaw
 systemctl --user stop nanoclaw
 systemctl --user restart nanoclaw
 ```
+
+## Architecture Notes
+
+- **Credential proxy** (`src/credential-proxy.ts`): Real API keys never enter containers. The host runs an HTTP proxy that intercepts SDK requests and injects real auth headers. Containers only see `ANTHROPIC_BASE_URL=http://host:port` with a placeholder key.
+- **IPC**: File-based (`data/ipc/`). Containers write JSON files; host polls and processes them. Used for send_message, task scheduling, group registration.
+- **Mount security** (`src/mount-security.ts`): External allowlist at `~/.config/nanoclaw/mount-allowlist.json` controls what host paths can be mounted. Blocked patterns prevent mounting `.ssh`, `.env`, credentials, etc.
+- **Group queue** (`src/group-queue.ts`): Serializes agent invocations per group with a global concurrency limit. Supports both fresh container spawns and piping into running containers.
 
 ## Troubleshooting
 

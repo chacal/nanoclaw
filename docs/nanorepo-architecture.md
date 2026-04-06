@@ -1,4 +1,6 @@
-# NanoClaw Skills Architecture
+# NanoClaw Skills Architecture (SUPERSEDED)
+
+> **This document is outdated.** The `.nanoclaw/` state tracking system described here was replaced by the simpler skills-as-branches approach. See [skills-as-branches.md](skills-as-branches.md) for the current architecture.
 
 ## What Skills Are For
 

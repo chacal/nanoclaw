@@ -86,7 +86,7 @@ A personal Claude assistant with multi-channel support, persistent memory per co
 
 ## Architecture: Channel System
 
-The core ships with no channels built in — each channel (WhatsApp, Telegram, Slack, Discord, Gmail) is installed as a [Claude Code skill](https://code.claude.com/docs/en/skills) that adds the channel code to your fork. Channels self-register at startup; installed channels with missing credentials emit a WARN log and are skipped.
+Signal and Telegram channels are built into core. Additional channels (WhatsApp, Slack, Discord, Gmail) can be installed as [Claude Code skills](https://code.claude.com/docs/en/skills) that add channel code to your fork. All channels self-register at startup; channels with missing credentials emit a WARN log and are skipped.
 
 ### System Diagram
 
@@ -255,18 +255,29 @@ nanoclaw/
 │   ├── index.ts                   # Orchestrator: state, message loop, agent invocation
 │   ├── channels/
 │   │   ├── registry.ts            # Channel factory registry
-│   │   └── index.ts               # Barrel imports for channel self-registration
+│   │   ├── index.ts               # Barrel imports for channel self-registration
+│   │   ├── signal.ts              # Signal channel (built-in)
+│   │   └── telegram.ts            # Telegram channel (built-in)
 │   ├── ipc.ts                     # IPC watcher and task processing
 │   ├── router.ts                  # Message formatting and outbound routing
 │   ├── config.ts                  # Configuration constants
 │   ├── types.ts                   # TypeScript interfaces (includes Channel)
 │   ├── logger.ts                  # Pino logger setup
+│   ├── env.ts                     # Environment variable loading
 │   ├── db.ts                      # SQLite database initialization and queries
 │   ├── group-queue.ts             # Per-group queue with global concurrency limit
+│   ├── group-folder.ts            # Group folder creation and path security
 │   ├── mount-security.ts          # Mount allowlist validation for containers
-│   ├── whatsapp-auth.ts           # Standalone WhatsApp authentication
+│   ├── sender-allowlist.ts        # Per-group sender filtering
+│   ├── credential-proxy.ts        # HTTP proxy for credential injection
+│   ├── container-runner.ts        # Spawns agents in containers
+│   ├── container-runtime.ts       # Container runtime management (Docker/Apple Container)
 │   ├── task-scheduler.ts          # Runs scheduled tasks when due
-│   └── container-runner.ts        # Spawns agents in containers
+│   ├── session-commands.ts        # Session management commands
+│   ├── remote-control.ts          # Remote agent control
+│   ├── voice-api.ts               # Voice transcription HTTP endpoint
+│   ├── transcription.ts           # Whisper API transcription
+│   └── timezone.ts                # Timezone utilities
 │
 ├── container/
 │   ├── Dockerfile                 # Container image (runs as 'node' user, includes Claude Code CLI)
@@ -724,7 +735,7 @@ All agents run inside containers (lightweight Linux VMs), providing:
 
 ### Prompt Injection Risk
 
-WhatsApp messages could contain malicious instructions attempting to manipulate Claude's behavior.
+Channel messages could contain malicious instructions attempting to manipulate Claude's behavior.
 
 **Mitigations:**
 - Container isolation limits blast radius
@@ -745,7 +756,7 @@ WhatsApp messages could contain malicious instructions attempting to manipulate 
 | Credential | Storage Location | Notes |
 |------------|------------------|-------|
 | Claude CLI Auth | data/sessions/{group}/.claude/ | Per-group isolation, mounted to /home/node/.claude/ |
-| WhatsApp Session | store/auth/ | Auto-created, persists ~20 days |
+| Channel Auth | store/auth/ (WhatsApp), env vars (Telegram bot token, Signal) | Channel-specific credential storage |
 
 ### File Permissions
 
