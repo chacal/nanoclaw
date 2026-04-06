@@ -4,6 +4,7 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -60,6 +61,7 @@ interface VolumeMount {
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  isScheduledTask?: boolean,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
@@ -145,7 +147,11 @@ function buildVolumeMounts(
     },
     enableAllProjectMcpServers: true,
   };
-  const model = group.containerConfig?.model || CLAUDE_CODE_MODEL;
+  const model = isScheduledTask
+    ? group.containerConfig?.taskModel ||
+      group.containerConfig?.model ||
+      CLAUDE_CODE_MODEL
+    : group.containerConfig?.model || CLAUDE_CODE_MODEL;
   if (model) {
     settings.model = model;
   }
@@ -238,13 +244,13 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Google Workspace CLI credentials (read-only, shared across all groups)
-  const gwsCredsDir = path.join(DATA_DIR, 'secrets');
-  if (fs.existsSync(path.join(gwsCredsDir, 'gws-credentials.json'))) {
+  // Google Workspace CLI config (read-write so gws can refresh its access token cache)
+  const gwsConfigDir = path.join(os.homedir(), '.config', 'gws');
+  if (fs.existsSync(path.join(gwsConfigDir, 'credentials.enc'))) {
     mounts.push({
-      hostPath: gwsCredsDir,
-      containerPath: '/workspace/secrets',
-      readonly: true,
+      hostPath: gwsConfigDir,
+      containerPath: '/workspace/gws-config',
+      readonly: false,
     });
   }
 
@@ -270,10 +276,12 @@ function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // Google Workspace CLI credentials path
+  // Google Workspace CLI config directory and keyring backend (file-based for containers)
   args.push(
     '-e',
-    'GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=/workspace/secrets/gws-credentials.json',
+    'GOOGLE_WORKSPACE_CLI_CONFIG_DIR=/workspace/gws-config',
+    '-e',
+    'GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file',
   );
 
   // Route API traffic through the credential proxy (containers never see real secrets)
@@ -330,7 +338,7 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const mounts = buildVolumeMounts(group, input.isMain, input.isScheduledTask);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);
