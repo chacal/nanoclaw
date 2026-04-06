@@ -384,18 +384,18 @@ describe('refresh_groups authorization', () => {
 
 // --- IPC message authorization ---
 // Tests the authorization pattern from startIpcWatcher (ipc.ts).
-// The logic: isMain || (targetGroup && targetGroup.folder === sourceGroup)
+// The logic: isMain || (targetGroup && targetGroup.folder === sourceFolder)
 
 describe('IPC message authorization', () => {
   // Replicate the exact check from the IPC watcher
   function isMessageAuthorized(
-    sourceGroup: string,
+    sourceFolder: string,
     isMain: boolean,
     targetChatJid: string,
     registeredGroups: Record<string, RegisteredGroup>,
   ): boolean {
     const targetGroup = registeredGroups[targetChatJid];
-    return isMain || (!!targetGroup && targetGroup.folder === sourceGroup);
+    return isMain || (!!targetGroup && targetGroup.folder === sourceFolder);
   }
 
   it('main group can send to any group', () => {

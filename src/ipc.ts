@@ -68,18 +68,18 @@ function parseSchedule(
  */
 function withTaskAuth(
   taskId: string | undefined,
-  sourceGroup: string,
+  sourceFolder: string,
   isMain: boolean,
   operationName: string,
   action: (task: NonNullable<ReturnType<typeof getTaskById>>) => void,
 ): void {
   if (!taskId) return;
   const task = getTaskById(taskId);
-  if (task && (isMain || task.group_folder === sourceGroup)) {
+  if (task && (isMain || task.group_folder === sourceFolder)) {
     action(task);
   } else {
     logger.warn(
-      { taskId, sourceGroup },
+      { taskId, sourceFolder },
       `Unauthorized task ${operationName} attempt`,
     );
   }
@@ -90,7 +90,7 @@ function withTaskAuth(
  */
 async function processMessageIpc(
   data: any,
-  sourceGroup: string,
+  sourceFolder: string,
   isMain: boolean,
   registeredGroups: Record<string, RegisteredGroup>,
   deps: Pick<IpcDeps, 'sendMessage'>,
@@ -104,9 +104,9 @@ async function processMessageIpc(
   }
 
   const targetGroup = registeredGroups[data.chatJid];
-  if (!isMain && !(targetGroup && targetGroup.folder === sourceGroup)) {
+  if (!isMain && !(targetGroup && targetGroup.folder === sourceFolder)) {
     logger.warn(
-      { chatJid: data.chatJid, sourceGroup },
+      { chatJid: data.chatJid, sourceFolder },
       'Unauthorized IPC message attempt blocked',
     );
     return;
@@ -117,7 +117,7 @@ async function processMessageIpc(
       data.chatJid,
       data.text,
       data.sender,
-      sourceGroup,
+      sourceFolder,
     );
     if (!sent) {
       await deps.sendMessage(data.chatJid, data.text);
@@ -127,7 +127,7 @@ async function processMessageIpc(
   }
 
   logger.info(
-    { chatJid: data.chatJid, sourceGroup, sender: data.sender },
+    { chatJid: data.chatJid, sourceFolder, sender: data.sender },
     'IPC message sent',
   );
 }
@@ -166,10 +166,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
       if (group.isMain) folderIsMain.set(group.folder, true);
     }
 
-    for (const sourceGroup of groupFolders) {
-      const isMain = folderIsMain.get(sourceGroup) === true;
-      const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
-      const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
+    for (const sourceFolder of groupFolders) {
+      const isMain = folderIsMain.get(sourceFolder) === true;
+      const messagesDir = path.join(ipcBaseDir, sourceFolder, 'messages');
+      const tasksDir = path.join(ipcBaseDir, sourceFolder, 'tasks');
 
       // Process messages from this group's IPC directory
       try {
@@ -183,7 +183,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               await processMessageIpc(
                 data,
-                sourceGroup,
+                sourceFolder,
                 isMain,
                 registeredGroups,
                 deps,
@@ -191,21 +191,21 @@ export function startIpcWatcher(deps: IpcDeps): void {
               fs.unlinkSync(filePath);
             } catch (err) {
               logger.error(
-                { file, sourceGroup, err },
+                { file, sourceFolder, err },
                 'Error processing IPC message',
               );
               const errorDir = path.join(ipcBaseDir, 'errors');
               fs.mkdirSync(errorDir, { recursive: true });
               fs.renameSync(
                 filePath,
-                path.join(errorDir, `${sourceGroup}-${file}`),
+                path.join(errorDir, `${sourceFolder}-${file}`),
               );
             }
           }
         }
       } catch (err) {
         logger.error(
-          { err, sourceGroup },
+          { err, sourceFolder },
           'Error reading IPC messages directory',
         );
       }
@@ -221,24 +221,24 @@ export function startIpcWatcher(deps: IpcDeps): void {
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               // Pass source group identity to processTaskIpc for authorization
-              await processTaskIpc(data, sourceGroup, isMain, deps);
+              await processTaskIpc(data, sourceFolder, isMain, deps);
               fs.unlinkSync(filePath);
             } catch (err) {
               logger.error(
-                { file, sourceGroup, err },
+                { file, sourceFolder, err },
                 'Error processing IPC task',
               );
               const errorDir = path.join(ipcBaseDir, 'errors');
               fs.mkdirSync(errorDir, { recursive: true });
               fs.renameSync(
                 filePath,
-                path.join(errorDir, `${sourceGroup}-${file}`),
+                path.join(errorDir, `${sourceFolder}-${file}`),
               );
             }
           }
         }
       } catch (err) {
-        logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+        logger.error({ err, sourceFolder }, 'Error reading IPC tasks directory');
       }
     }
 
@@ -268,7 +268,7 @@ export async function processTaskIpc(
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
   },
-  sourceGroup: string, // Verified identity from IPC directory
+  sourceFolder: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
   deps: IpcDeps,
 ): Promise<void> {
@@ -297,9 +297,9 @@ export async function processTaskIpc(
         const targetFolder = targetGroupEntry.folder;
 
         // Authorization: non-main groups can only schedule for themselves
-        if (!isMain && targetFolder !== sourceGroup) {
+        if (!isMain && targetFolder !== sourceFolder) {
           logger.warn(
-            { sourceGroup, targetFolder },
+            { sourceFolder, targetFolder },
             'Unauthorized schedule_task attempt blocked',
           );
           break;
@@ -331,7 +331,7 @@ export async function processTaskIpc(
           created_at: new Date().toISOString(),
         });
         logger.info(
-          { taskId, sourceGroup, targetFolder, contextMode },
+          { taskId, sourceFolder, targetFolder, contextMode },
           'Task created via IPC',
         );
         deps.onTasksChanged();
@@ -339,31 +339,40 @@ export async function processTaskIpc(
       break;
 
     case 'pause_task':
-      withTaskAuth(data.taskId, sourceGroup, isMain, 'pause', () => {
+      withTaskAuth(data.taskId, sourceFolder, isMain, 'pause', () => {
         updateTask(data.taskId!, { status: 'paused' });
-        logger.info({ taskId: data.taskId, sourceGroup }, 'Task paused via IPC');
+        logger.info(
+          { taskId: data.taskId, sourceFolder },
+          'Task paused via IPC',
+        );
         deps.onTasksChanged();
       });
       break;
 
     case 'resume_task':
-      withTaskAuth(data.taskId, sourceGroup, isMain, 'resume', () => {
+      withTaskAuth(data.taskId, sourceFolder, isMain, 'resume', () => {
         updateTask(data.taskId!, { status: 'active' });
-        logger.info({ taskId: data.taskId, sourceGroup }, 'Task resumed via IPC');
+        logger.info(
+          { taskId: data.taskId, sourceFolder },
+          'Task resumed via IPC',
+        );
         deps.onTasksChanged();
       });
       break;
 
     case 'cancel_task':
-      withTaskAuth(data.taskId, sourceGroup, isMain, 'cancel', () => {
+      withTaskAuth(data.taskId, sourceFolder, isMain, 'cancel', () => {
         deleteTask(data.taskId!);
-        logger.info({ taskId: data.taskId, sourceGroup }, 'Task cancelled via IPC');
+        logger.info(
+          { taskId: data.taskId, sourceFolder },
+          'Task cancelled via IPC',
+        );
         deps.onTasksChanged();
       });
       break;
 
     case 'update_task':
-      withTaskAuth(data.taskId, sourceGroup, isMain, 'update', (task) => {
+      withTaskAuth(data.taskId, sourceFolder, isMain, 'update', (task) => {
         const updates: Parameters<typeof updateTask>[1] = {};
         if (data.prompt !== undefined) updates.prompt = data.prompt;
         if (data.schedule_type !== undefined)
@@ -387,7 +396,7 @@ export async function processTaskIpc(
 
         updateTask(data.taskId!, updates);
         logger.info(
-          { taskId: data.taskId, sourceGroup, updates },
+          { taskId: data.taskId, sourceFolder, updates },
           'Task updated via IPC',
         );
         deps.onTasksChanged();
@@ -398,21 +407,21 @@ export async function processTaskIpc(
       // Only main group can request a refresh
       if (isMain) {
         logger.info(
-          { sourceGroup },
+          { sourceFolder },
           'Group metadata refresh requested via IPC',
         );
         await deps.syncGroups(true);
         // Write updated snapshot immediately
         const availableGroups = deps.getAvailableGroups();
         deps.writeGroupsSnapshot(
-          sourceGroup,
+          sourceFolder,
           true,
           availableGroups,
           new Set(Object.keys(registeredGroups)),
         );
       } else {
         logger.warn(
-          { sourceGroup },
+          { sourceFolder },
           'Unauthorized refresh_groups attempt blocked',
         );
       }
@@ -422,7 +431,7 @@ export async function processTaskIpc(
       // Only main group can register new groups
       if (!isMain) {
         logger.warn(
-          { sourceGroup },
+          { sourceFolder },
           'Unauthorized register_group attempt blocked',
         );
         break;
@@ -430,7 +439,7 @@ export async function processTaskIpc(
       if (data.jid && data.name && data.folder && data.trigger) {
         if (!isValidGroupFolder(data.folder)) {
           logger.warn(
-            { sourceGroup, folder: data.folder },
+            { sourceFolder, folder: data.folder },
             'Invalid register_group request - unsafe folder name',
           );
           break;

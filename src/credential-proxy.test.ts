@@ -653,7 +653,7 @@ describe('OAuth token refresh', () => {
             });
 
             // Create mock response
-            const res = new PassThrough() as PassThrough & {
+            const res = new PassThrough() as InstanceType<typeof PassThrough> & {
               statusCode: number;
             };
             res.statusCode = mockHttpsResponse.statusCode;
@@ -712,9 +712,8 @@ describe('OAuth token refresh', () => {
       ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
     });
 
-    const { startCredentialProxy: start } = await import(
-      './credential-proxy.js'
-    );
+    const { startCredentialProxy: start } =
+      await import('./credential-proxy.js');
     const server = await start(0);
     proxyServer = server;
     const port = (server.address() as AddressInfo).port;
@@ -982,7 +981,7 @@ describe('OAuth token refresh', () => {
               body,
             });
 
-            const res = new PassThrough() as PassThrough & {
+            const res = new PassThrough() as InstanceType<typeof PassThrough> & {
               statusCode: number;
             };
 
@@ -1027,9 +1026,8 @@ describe('OAuth token refresh', () => {
       };
     });
 
-    const { startCredentialProxy: start } = await import(
-      './credential-proxy.js'
-    );
+    const { startCredentialProxy: start } =
+      await import('./credential-proxy.js');
 
     for (const key of Object.keys(mockEnvRefresh)) delete mockEnvRefresh[key];
     Object.assign(mockEnvRefresh, {

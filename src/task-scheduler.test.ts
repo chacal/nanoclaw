@@ -33,7 +33,7 @@ describe('task scheduler', () => {
     });
 
     const enqueueTask = vi.fn(
-      (_groupJid: string, _taskId: string, fn: () => Promise<void>) => {
+      (_chatJid: string, _taskId: string, fn: () => Promise<void>) => {
         void fn();
       },
     );

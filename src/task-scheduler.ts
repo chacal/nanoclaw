@@ -67,7 +67,7 @@ export interface SchedulerDependencies {
   getSessions: () => Record<string, string>;
   queue: GroupQueue;
   onProcess: (
-    groupJid: string,
+    chatJid: string,
     proc: ChildProcess,
     containerName: string,
     groupFolder: string,
