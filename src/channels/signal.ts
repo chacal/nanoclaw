@@ -1,8 +1,10 @@
 import { ChildProcess, spawn } from 'child_process';
+import fs from 'fs';
 import path from 'path';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
+import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import { transcribeAudio } from '../transcription.js';
 import { registerChannel, chunkText, ChannelOpts } from './registry.js';
@@ -187,8 +189,25 @@ export class SignalChannel implements Channel {
       }
     }
 
+    // Check for image attachments
+    const imageAttachment = attachments.find(
+      (a: any) => a.contentType?.startsWith('image/') && a.id,
+    );
+    let imageRelativePath: string | null = null;
+    if (imageAttachment) {
+      const resolved = path.resolve(ATTACHMENTS_DIR, imageAttachment.id);
+      if (resolved.startsWith(ATTACHMENTS_DIR + path.sep)) {
+        imageRelativePath = resolved;
+      } else {
+        logger.warn(
+          { id: imageAttachment.id },
+          'Image attachment ID escapes attachments directory, ignoring',
+        );
+      }
+    }
+
     const text = dataMessage.message;
-    if (!text && !voiceFilePath) return; // Skip if no text and no voice
+    if (!text && !voiceFilePath && !imageRelativePath) return;
 
     // Signal uses UUIDs as primary identifiers; phone number may be null
     const source =
@@ -266,7 +285,7 @@ export class SignalChannel implements Channel {
       }
     }
 
-    if (!content) return;
+    if (!content && !imageRelativePath) return;
 
     // Translate @mention to trigger format (like Telegram does)
     const namePattern = new RegExp(
@@ -296,6 +315,50 @@ export class SignalChannel implements Channel {
       );
       return;
     }
+
+    // Copy image attachment to group workspace so the container agent can see it
+    if (imageRelativePath) {
+      try {
+        const groupDir = resolveGroupFolderPath(group.folder);
+        const imagesDir = path.join(groupDir, 'images');
+        fs.mkdirSync(imagesDir, { recursive: true });
+
+        const mimeToExt: Record<string, string> = {
+          'image/jpeg': '.jpg',
+          'image/png': '.png',
+          'image/gif': '.gif',
+          'image/webp': '.webp',
+        };
+        const ext = mimeToExt[imageAttachment.contentType] || '.jpg';
+        const filename = `sig-${Date.now()}-${imageAttachment.id}${ext}`;
+        fs.copyFileSync(imageRelativePath, path.join(imagesDir, filename));
+
+        const marker = `[Image: images/${filename}]`;
+        content = content ? `${content}\n${marker}` : marker;
+        logger.info({ chatJid, filename }, 'Copied Signal image attachment');
+
+        // Opportunistic cleanup: delete images older than 7 days
+        const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+        try {
+          for (const f of fs.readdirSync(imagesDir)) {
+            const fp = path.join(imagesDir, f);
+            try {
+              if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp);
+            } catch {
+              /* ignore */
+            }
+          }
+        } catch {
+          /* best effort */
+        }
+      } catch (err) {
+        logger.warn({ err, chatJid }, 'Failed to copy Signal image');
+        const fallback = '[Photo]';
+        content = content ? `${content}\n${fallback}` : fallback;
+      }
+    }
+
+    if (!content) return;
 
     this.opts.onMessage(chatJid, {
       id: String(envelope.timestamp),
