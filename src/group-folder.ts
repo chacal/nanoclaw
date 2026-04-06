@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
@@ -41,4 +42,31 @@ export function resolveGroupIpcPath(folder: string): string {
   const ipcPath = path.resolve(ipcBaseDir, folder);
   ensureWithinBase(ipcBaseDir, ipcPath);
   return ipcPath;
+}
+
+export const IMAGE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/** Ensure the images/ directory exists under a group folder and return its path. */
+export function getGroupImagesDir(groupFolder: string): string {
+  const groupDir = resolveGroupFolderPath(groupFolder);
+  const imagesDir = path.join(groupDir, 'images');
+  fs.mkdirSync(imagesDir, { recursive: true });
+  return imagesDir;
+}
+
+/** Delete image files older than IMAGE_MAX_AGE_MS. Best-effort, never throws. */
+export function cleanupOldImages(imagesDir: string): void {
+  try {
+    const cutoff = Date.now() - IMAGE_MAX_AGE_MS;
+    for (const f of fs.readdirSync(imagesDir)) {
+      const fp = path.join(imagesDir, f);
+      try {
+        if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp);
+      } catch {
+        /* ignore individual file errors */
+      }
+    }
+  } catch {
+    /* best effort */
+  }
 }

@@ -4,13 +4,14 @@ import path from 'path';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
-import { resolveGroupFolderPath } from '../group-folder.js';
+import {
+  cleanupOldImages,
+  getGroupImagesDir,
+} from '../group-folder.js';
 import { logger } from '../logger.js';
 import { transcribeAudio } from '../transcription.js';
 import { registerChannel, chunkText, ChannelOpts } from './registry.js';
 import { Channel } from '../types.js';
-
-const IMAGE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Find an attachment matching a content type prefix and resolve its path safely.
@@ -345,10 +346,6 @@ export class SignalChannel implements Channel {
     chatJid: string,
   ): string | null {
     try {
-      const groupDir = resolveGroupFolderPath(groupFolder);
-      const imagesDir = path.join(groupDir, 'images');
-      fs.mkdirSync(imagesDir, { recursive: true });
-
       const mimeToExt: Record<string, string> = {
         'image/jpeg': '.jpg',
         'image/png': '.png',
@@ -357,24 +354,11 @@ export class SignalChannel implements Channel {
       };
       const ext = mimeToExt[imageAttachment.contentType] || '.jpg';
       const filename = `sig-${Date.now()}-${imageAttachment.id}${ext}`;
+
+      const imagesDir = getGroupImagesDir(groupFolder);
       fs.copyFileSync(imagePath, path.join(imagesDir, filename));
-
       logger.info({ chatJid, filename }, 'Copied Signal image attachment');
-
-      // Opportunistic cleanup: delete images older than 7 days
-      const cutoff = Date.now() - IMAGE_MAX_AGE_MS;
-      try {
-        for (const f of fs.readdirSync(imagesDir)) {
-          const fp = path.join(imagesDir, f);
-          try {
-            if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp);
-          } catch {
-            /* ignore */
-          }
-        }
-      } catch {
-        /* best effort */
-      }
+      cleanupOldImages(imagesDir);
 
       return `[Image: images/${filename}]`;
     } catch (err) {
