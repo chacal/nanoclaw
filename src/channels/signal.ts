@@ -10,6 +10,33 @@ import { transcribeAudio } from '../transcription.js';
 import { registerChannel, chunkText, ChannelOpts } from './registry.js';
 import { Channel } from '../types.js';
 
+const IMAGE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Find an attachment matching a content type prefix and resolve its path safely.
+ * Returns null if no matching attachment or if the path escapes the attachments directory.
+ */
+function resolveAttachmentPath(
+  attachments: any[],
+  contentTypePrefix: string,
+  attachmentsDir: string,
+): { attachment: any; resolvedPath: string } | null {
+  const match = attachments.find(
+    (a: any) => a.contentType?.startsWith(contentTypePrefix) && a.id,
+  );
+  if (!match) return null;
+
+  const resolved = path.resolve(attachmentsDir, match.id);
+  if (!resolved.startsWith(attachmentsDir + path.sep)) {
+    logger.warn(
+      { id: match.id },
+      'Attachment ID escapes attachments directory, ignoring',
+    );
+    return null;
+  }
+  return { attachment: match, resolvedPath: resolved };
+}
+
 export class SignalChannel implements Channel {
   name = 'signal';
 
@@ -168,43 +195,18 @@ export class SignalChannel implements Channel {
     const dataMessage = envelope.dataMessage;
     if (!dataMessage) return; // Skip receipts, typing indicators, etc.
 
-    // Check for voice message attachments
     // signal-cli stores attachments at ~/.local/share/signal-cli/attachments/{id}
     const ATTACHMENTS_DIR =
       process.env.HOME + '/.local/share/signal-cli/attachments';
     const attachments = dataMessage.attachments || [];
-    const voiceAttachment = attachments.find(
-      (a: any) => a.contentType?.startsWith('audio/') && a.id,
-    );
-    let voiceFilePath: string | null = null;
-    if (voiceAttachment) {
-      const resolved = path.resolve(ATTACHMENTS_DIR, voiceAttachment.id);
-      if (resolved.startsWith(ATTACHMENTS_DIR + path.sep)) {
-        voiceFilePath = resolved;
-      } else {
-        logger.warn(
-          { id: voiceAttachment.id },
-          'Attachment ID escapes attachments directory, ignoring',
-        );
-      }
-    }
 
-    // Check for image attachments
-    const imageAttachment = attachments.find(
-      (a: any) => a.contentType?.startsWith('image/') && a.id,
-    );
-    let imageRelativePath: string | null = null;
-    if (imageAttachment) {
-      const resolved = path.resolve(ATTACHMENTS_DIR, imageAttachment.id);
-      if (resolved.startsWith(ATTACHMENTS_DIR + path.sep)) {
-        imageRelativePath = resolved;
-      } else {
-        logger.warn(
-          { id: imageAttachment.id },
-          'Image attachment ID escapes attachments directory, ignoring',
-        );
-      }
-    }
+    const voice = resolveAttachmentPath(attachments, 'audio/', ATTACHMENTS_DIR);
+    const voiceAttachment = voice?.attachment;
+    const voiceFilePath = voice?.resolvedPath ?? null;
+
+    const image = resolveAttachmentPath(attachments, 'image/', ATTACHMENTS_DIR);
+    const imageAttachment = image?.attachment;
+    const imageRelativePath = image?.resolvedPath ?? null;
 
     const text = dataMessage.message;
     if (!text && !voiceFilePath && !imageRelativePath) return;
@@ -243,27 +245,8 @@ export class SignalChannel implements Channel {
     // Build content: text message or voice transcription
     let content = text || '';
 
-    // Signal mentions replace the mentioned name with U+FFFC (object replacement
-    // character) in the message body. The actual mention data is in dataMessage.mentions.
-    // Reconstruct the text by replacing each placeholder with @name.
-    const mentions = dataMessage.mentions || [];
-    if (mentions.length > 0 && content) {
-      // Sort by start position descending so replacements don't shift indices
-      const sorted = [...mentions].sort(
-        (a: any, b: any) => (b.start ?? 0) - (a.start ?? 0),
-      );
-      for (const m of sorted) {
-        const start = m.start ?? 0;
-        const len = m.length ?? 1;
-        if (start < 0 || start >= content.length) continue;
-        // Signal puts phone number or UUID as mention name — map our own
-        // number/UUID to the assistant name so the trigger pattern matches.
-        const isSelf = m.number === this.phoneNumber;
-        const name = isSelf ? ASSISTANT_NAME : this.resolveMentionName(m);
-        content =
-          content.slice(0, start) + `@${name}` + content.slice(start + len);
-      }
-    }
+    // Reconstruct mention placeholders (U+FFFC) with actual @names
+    content = this.reconstructMentions(content, dataMessage.mentions || []);
 
     if (voiceFilePath) {
       const transcript = await transcribeAudio(
@@ -317,45 +300,15 @@ export class SignalChannel implements Channel {
     }
 
     // Copy image attachment to group workspace so the container agent can see it
-    if (imageRelativePath) {
-      try {
-        const groupDir = resolveGroupFolderPath(group.folder);
-        const imagesDir = path.join(groupDir, 'images');
-        fs.mkdirSync(imagesDir, { recursive: true });
-
-        const mimeToExt: Record<string, string> = {
-          'image/jpeg': '.jpg',
-          'image/png': '.png',
-          'image/gif': '.gif',
-          'image/webp': '.webp',
-        };
-        const ext = mimeToExt[imageAttachment.contentType] || '.jpg';
-        const filename = `sig-${Date.now()}-${imageAttachment.id}${ext}`;
-        fs.copyFileSync(imageRelativePath, path.join(imagesDir, filename));
-
-        const marker = `[Image: images/${filename}]`;
-        content = content ? `${content}\n${marker}` : marker;
-        logger.info({ chatJid, filename }, 'Copied Signal image attachment');
-
-        // Opportunistic cleanup: delete images older than 7 days
-        const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-        try {
-          for (const f of fs.readdirSync(imagesDir)) {
-            const fp = path.join(imagesDir, f);
-            try {
-              if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp);
-            } catch {
-              /* ignore */
-            }
-          }
-        } catch {
-          /* best effort */
-        }
-      } catch (err) {
-        logger.warn({ err, chatJid }, 'Failed to copy Signal image');
-        const fallback = '[Photo]';
-        content = content ? `${content}\n${fallback}` : fallback;
-      }
+    if (imageRelativePath && imageAttachment) {
+      const marker = this.copyImageToWorkspace(
+        imageRelativePath,
+        imageAttachment,
+        group.folder,
+        chatJid,
+      );
+      const tag = marker || '[Photo]';
+      content = content ? `${content}\n${tag}` : tag;
     }
 
     if (!content) return;
@@ -381,6 +334,77 @@ export class SignalChannel implements Channel {
    * number or UUID into the `name` field — look up a real name from the cache
    * built from previously seen messages.
    */
+  /**
+   * Copy an image attachment into the group workspace and clean up old images.
+   * Returns the image marker string (e.g. "[Image: images/filename]") or null on error.
+   */
+  private copyImageToWorkspace(
+    imagePath: string,
+    imageAttachment: any,
+    groupFolder: string,
+    chatJid: string,
+  ): string | null {
+    try {
+      const groupDir = resolveGroupFolderPath(groupFolder);
+      const imagesDir = path.join(groupDir, 'images');
+      fs.mkdirSync(imagesDir, { recursive: true });
+
+      const mimeToExt: Record<string, string> = {
+        'image/jpeg': '.jpg',
+        'image/png': '.png',
+        'image/gif': '.gif',
+        'image/webp': '.webp',
+      };
+      const ext = mimeToExt[imageAttachment.contentType] || '.jpg';
+      const filename = `sig-${Date.now()}-${imageAttachment.id}${ext}`;
+      fs.copyFileSync(imagePath, path.join(imagesDir, filename));
+
+      logger.info({ chatJid, filename }, 'Copied Signal image attachment');
+
+      // Opportunistic cleanup: delete images older than 7 days
+      const cutoff = Date.now() - IMAGE_MAX_AGE_MS;
+      try {
+        for (const f of fs.readdirSync(imagesDir)) {
+          const fp = path.join(imagesDir, f);
+          try {
+            if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp);
+          } catch {
+            /* ignore */
+          }
+        }
+      } catch {
+        /* best effort */
+      }
+
+      return `[Image: images/${filename}]`;
+    } catch (err) {
+      logger.warn({ err, chatJid }, 'Failed to copy Signal image');
+      return null;
+    }
+  }
+
+  /**
+   * Replace U+FFFC placeholders in message body with @name from mention data.
+   */
+  private reconstructMentions(content: string, mentions: any[]): string {
+    if (mentions.length === 0 || !content) return content;
+
+    // Sort by start position descending so replacements don't shift indices
+    const sorted = [...mentions].sort(
+      (a: any, b: any) => (b.start ?? 0) - (a.start ?? 0),
+    );
+    for (const m of sorted) {
+      const start = m.start ?? 0;
+      const len = m.length ?? 1;
+      if (start < 0 || start >= content.length) continue;
+      const isSelf = m.number === this.phoneNumber;
+      const name = isSelf ? ASSISTANT_NAME : this.resolveMentionName(m);
+      content =
+        content.slice(0, start) + `@${name}` + content.slice(start + len);
+    }
+    return content;
+  }
+
   private resolveMentionName(mention: any): string {
     const { name, number: num, uuid } = mention;
     // If signal-cli already provided a real name (not a phone number/UUID), use it

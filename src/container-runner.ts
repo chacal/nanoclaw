@@ -327,6 +327,127 @@ function buildContainerArgs(
   return args;
 }
 
+function writeContainerLog(opts: {
+  logsDir: string;
+  groupName: string;
+  isMain: boolean;
+  duration: number;
+  exitCode: number | null;
+  input: ContainerInput;
+  containerArgs: string[];
+  mounts: VolumeMount[];
+  stdout: string;
+  stderr: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+}): string {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const logFile = path.join(opts.logsDir, `container-${timestamp}.log`);
+  const isVerbose =
+    process.env.LOG_LEVEL === 'debug' || process.env.LOG_LEVEL === 'trace';
+
+  const logLines = [
+    `=== Container Run Log ===`,
+    `Timestamp: ${new Date().toISOString()}`,
+    `Group: ${opts.groupName}`,
+    `IsMain: ${opts.isMain}`,
+    `Duration: ${opts.duration}ms`,
+    `Exit Code: ${opts.exitCode}`,
+    `Stdout Truncated: ${opts.stdoutTruncated}`,
+    `Stderr Truncated: ${opts.stderrTruncated}`,
+    ``,
+  ];
+
+  const isError = opts.exitCode !== 0;
+
+  if (isVerbose || isError) {
+    if (isVerbose) {
+      logLines.push(`=== Input ===`, JSON.stringify(opts.input, null, 2), ``);
+    } else {
+      logLines.push(
+        `=== Input Summary ===`,
+        `Prompt length: ${opts.input.prompt.length} chars`,
+        `Session ID: ${opts.input.sessionId || 'new'}`,
+        ``,
+      );
+    }
+    logLines.push(
+      `=== Container Args ===`,
+      opts.containerArgs.join(' '),
+      ``,
+      `=== Mounts ===`,
+      opts.mounts
+        .map(
+          (m) =>
+            `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
+        )
+        .join('\n'),
+      ``,
+      `=== Stderr${opts.stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
+      opts.stderr,
+      ``,
+      `=== Stdout${opts.stdoutTruncated ? ' (TRUNCATED)' : ''} ===`,
+      opts.stdout,
+    );
+  } else {
+    logLines.push(
+      `=== Input Summary ===`,
+      `Prompt length: ${opts.input.prompt.length} chars`,
+      `Session ID: ${opts.input.sessionId || 'new'}`,
+      ``,
+      `=== Mounts ===`,
+      opts.mounts
+        .map((m) => `${m.containerPath}${m.readonly ? ' (ro)' : ''}`)
+        .join('\n'),
+      ``,
+    );
+  }
+
+  fs.writeFileSync(logFile, logLines.join('\n'));
+  logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
+  return logFile;
+}
+
+function createTimeoutManager(opts: {
+  group: RegisteredGroup;
+  containerName: string;
+  container: ChildProcess;
+  configTimeout: number;
+}): { reset: () => void; clear: () => void; isTimedOut: () => boolean } {
+  let timedOut = false;
+  // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
+  // graceful _close sentinel has time to trigger before the hard kill fires.
+  const timeoutMs = Math.max(opts.configTimeout, IDLE_TIMEOUT + 30_000);
+
+  const killOnTimeout = () => {
+    timedOut = true;
+    logger.error(
+      { group: opts.group.name, containerName: opts.containerName },
+      'Container timeout, stopping gracefully',
+    );
+    exec(stopContainer(opts.containerName), { timeout: 15000 }, (err) => {
+      if (err) {
+        logger.warn(
+          { group: opts.group.name, containerName: opts.containerName, err },
+          'Graceful stop failed, force killing',
+        );
+        opts.container.kill('SIGKILL');
+      }
+    });
+  };
+
+  let timeout = setTimeout(killOnTimeout, timeoutMs);
+
+  return {
+    reset: () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(killOnTimeout, timeoutMs);
+    },
+    clear: () => clearTimeout(timeout),
+    isTimedOut: () => timedOut,
+  };
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -427,12 +548,17 @@ export async function runContainerAgent(
             }
             hadStreamingOutput = true;
             // Activity detected — reset the hard timeout
-            resetTimeout();
+            tmgr.reset();
             // Call onOutput for all markers (including null results)
             // so idle timers start even for "silent" query completions.
-            outputChain = outputChain.then(() => onOutput(parsed)).catch((err) =>
-              logger.error({ group: group.name, err }, 'Error in onOutput callback'),
-            );
+            outputChain = outputChain
+              .then(() => onOutput(parsed))
+              .catch((err) =>
+                logger.error(
+                  { group: group.name, err },
+                  'Error in onOutput callback',
+                ),
+              );
           } catch (err) {
             logger.warn(
               { group: group.name, error: err },
@@ -465,43 +591,20 @@ export async function runContainerAgent(
       }
     });
 
-    let timedOut = false;
     let hadStreamingOutput = false;
     const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
-    // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
-    // graceful _close sentinel has time to trigger before the hard kill fires.
-    const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
-
-    const killOnTimeout = () => {
-      timedOut = true;
-      logger.error(
-        { group: group.name, containerName },
-        'Container timeout, stopping gracefully',
-      );
-      exec(stopContainer(containerName), { timeout: 15000 }, (err) => {
-        if (err) {
-          logger.warn(
-            { group: group.name, containerName, err },
-            'Graceful stop failed, force killing',
-          );
-          container.kill('SIGKILL');
-        }
-      });
-    };
-
-    let timeout = setTimeout(killOnTimeout, timeoutMs);
-
-    // Reset the timeout whenever there's activity (streaming output)
-    const resetTimeout = () => {
-      clearTimeout(timeout);
-      timeout = setTimeout(killOnTimeout, timeoutMs);
-    };
+    const tmgr = createTimeoutManager({
+      group,
+      containerName,
+      container,
+      configTimeout,
+    });
 
     container.on('close', (code) => {
-      clearTimeout(timeout);
+      tmgr.clear();
       const duration = Date.now() - startTime;
 
-      if (timedOut) {
+      if (tmgr.isTimedOut()) {
         const ts = new Date().toISOString().replace(/[:.]/g, '-');
         const timeoutLog = path.join(logsDir, `container-${ts}.log`);
         fs.writeFileSync(
@@ -548,73 +651,20 @@ export async function runContainerAgent(
         return;
       }
 
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const logFile = path.join(logsDir, `container-${timestamp}.log`);
-      const isVerbose =
-        process.env.LOG_LEVEL === 'debug' || process.env.LOG_LEVEL === 'trace';
-
-      const logLines = [
-        `=== Container Run Log ===`,
-        `Timestamp: ${new Date().toISOString()}`,
-        `Group: ${group.name}`,
-        `IsMain: ${input.isMain}`,
-        `Duration: ${duration}ms`,
-        `Exit Code: ${code}`,
-        `Stdout Truncated: ${stdoutTruncated}`,
-        `Stderr Truncated: ${stderrTruncated}`,
-        ``,
-      ];
-
-      const isError = code !== 0;
-
-      if (isVerbose || isError) {
-        // On error, log input metadata only — not the full prompt.
-        // Full input is only included at verbose level to avoid
-        // persisting user conversation content on every non-zero exit.
-        if (isVerbose) {
-          logLines.push(`=== Input ===`, JSON.stringify(input, null, 2), ``);
-        } else {
-          logLines.push(
-            `=== Input Summary ===`,
-            `Prompt length: ${input.prompt.length} chars`,
-            `Session ID: ${input.sessionId || 'new'}`,
-            ``,
-          );
-        }
-        logLines.push(
-          `=== Container Args ===`,
-          containerArgs.join(' '),
-          ``,
-          `=== Mounts ===`,
-          mounts
-            .map(
-              (m) =>
-                `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
-            )
-            .join('\n'),
-          ``,
-          `=== Stderr${stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
-          stderr,
-          ``,
-          `=== Stdout${stdoutTruncated ? ' (TRUNCATED)' : ''} ===`,
-          stdout,
-        );
-      } else {
-        logLines.push(
-          `=== Input Summary ===`,
-          `Prompt length: ${input.prompt.length} chars`,
-          `Session ID: ${input.sessionId || 'new'}`,
-          ``,
-          `=== Mounts ===`,
-          mounts
-            .map((m) => `${m.containerPath}${m.readonly ? ' (ro)' : ''}`)
-            .join('\n'),
-          ``,
-        );
-      }
-
-      fs.writeFileSync(logFile, logLines.join('\n'));
-      logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
+      const logFile = writeContainerLog({
+        logsDir,
+        groupName: group.name,
+        isMain: input.isMain,
+        duration,
+        exitCode: code,
+        input,
+        containerArgs,
+        mounts,
+        stdout,
+        stderr,
+        stdoutTruncated,
+        stderrTruncated,
+      });
 
       if (code !== 0) {
         logger.error(
@@ -703,7 +753,7 @@ export async function runContainerAgent(
     });
 
     container.on('error', (err) => {
-      clearTimeout(timeout);
+      tmgr.clear();
       logger.error(
         { group: group.name, containerName, error: err },
         'Container spawn error',
