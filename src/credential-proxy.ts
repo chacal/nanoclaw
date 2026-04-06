@@ -187,8 +187,35 @@ async function getOAuthToken(fallbackToken: string): Promise<string> {
         );
         return newCreds.accessToken;
       } catch (err) {
+        // Refresh token may have been rotated by a prior refresh — re-read
+        // the credentials file and retry once with the updated token.
+        if (credentialsFilePath) {
+          const reloaded = loadCredentialsFile(credentialsFilePath);
+          if (
+            reloaded &&
+            reloaded.refreshToken !== cachedCredentials!.refreshToken
+          ) {
+            logger.info(
+              'Retrying OAuth refresh with updated credentials from file',
+            );
+            try {
+              const newCreds = await refreshOAuthToken(reloaded.refreshToken);
+              cachedCredentials = newCreds;
+              saveCredentialsFile(credentialsFilePath, newCreds);
+              logger.info(
+                { expiresAt: new Date(newCreds.expiresAt).toISOString() },
+                'OAuth token refreshed (retry)',
+              );
+              return newCreds.accessToken;
+            } catch (retryErr) {
+              logger.error(
+                { err: retryErr },
+                'OAuth token refresh retry also failed',
+              );
+            }
+          }
+        }
         logger.error({ err }, 'OAuth token refresh failed');
-        // Return current token as fallback — it may still work briefly
         return cachedCredentials?.accessToken || fallbackToken;
       } finally {
         refreshInProgress = null;
