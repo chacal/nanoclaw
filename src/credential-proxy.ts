@@ -269,7 +269,7 @@ export function startCredentialProxy(
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', async () => {
-        const reqPath = req.url || '/';
+        const reqPath = path.posix.normalize(req.url || '/');
         if (!ALLOWED_PATH_PREFIXES.some((p) => reqPath.startsWith(p))) {
           logger.warn({ path: reqPath }, 'Blocked request to disallowed path');
           res.writeHead(403);

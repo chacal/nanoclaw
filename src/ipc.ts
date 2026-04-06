@@ -132,6 +132,27 @@ async function processMessageIpc(
   );
 }
 
+const ERROR_FILE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/** Delete error files older than ERROR_FILE_MAX_AGE_MS. Best-effort. */
+function cleanupOldErrorFiles(ipcBaseDir: string): void {
+  const errorDir = path.join(ipcBaseDir, 'errors');
+  try {
+    if (!fs.existsSync(errorDir)) return;
+    const cutoff = Date.now() - ERROR_FILE_MAX_AGE_MS;
+    for (const f of fs.readdirSync(errorDir)) {
+      const fp = path.join(errorDir, f);
+      try {
+        if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp);
+      } catch {
+        /* ignore individual file errors */
+      }
+    }
+  } catch {
+    /* best effort */
+  }
+}
+
 let ipcWatcherRunning = false;
 
 export function startIpcWatcher(deps: IpcDeps): void {
@@ -145,6 +166,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
   fs.mkdirSync(ipcBaseDir, { recursive: true });
 
   const processIpcFiles = async () => {
+    cleanupOldErrorFiles(ipcBaseDir);
+
     // Scan all group IPC directories (identity determined by directory)
     let groupFolders: string[];
     try {
@@ -238,7 +261,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
           }
         }
       } catch (err) {
-        logger.error({ err, sourceFolder }, 'Error reading IPC tasks directory');
+        logger.error(
+          { err, sourceFolder },
+          'Error reading IPC tasks directory',
+        );
       }
     }
 

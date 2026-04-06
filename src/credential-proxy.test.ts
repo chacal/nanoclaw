@@ -380,14 +380,20 @@ describe('credential-proxy', () => {
       expect(res.statusCode).toBe(403);
     });
 
-    it('blocks /v1/messages subpath that is not a real messages endpoint', async () => {
-      // Note: /v1/messages/../billing/usage would pass the prefix check because
-      // req.url is not path-normalized. This test verifies that unrelated paths
-      // outside the allowed prefixes are blocked.
+    it('blocks /v1/models with 403', async () => {
       const res = await makeRequest(port, {
         method: 'GET',
         path: '/v1/models',
       });
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('blocks path traversal via ..', async () => {
+      const res = await makeRequest(port, {
+        method: 'GET',
+        path: '/v1/messages/../billing/usage',
+      });
+      // path.posix.normalize resolves .. before the prefix check
       expect(res.statusCode).toBe(403);
     });
   });
@@ -653,7 +659,9 @@ describe('OAuth token refresh', () => {
             });
 
             // Create mock response
-            const res = new PassThrough() as InstanceType<typeof PassThrough> & {
+            const res = new PassThrough() as InstanceType<
+              typeof PassThrough
+            > & {
               statusCode: number;
             };
             res.statusCode = mockHttpsResponse.statusCode;
@@ -981,7 +989,9 @@ describe('OAuth token refresh', () => {
               body,
             });
 
-            const res = new PassThrough() as InstanceType<typeof PassThrough> & {
+            const res = new PassThrough() as InstanceType<
+              typeof PassThrough
+            > & {
               statusCode: number;
             };
 
