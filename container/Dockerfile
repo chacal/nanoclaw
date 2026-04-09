@@ -53,6 +53,10 @@ RUN npm run build && \
 COPY ha-api.sh /usr/local/bin/ha-api
 RUN chmod +x /usr/local/bin/ha-api
 
+# Install wolfram-alpha helper for Wolfram Alpha Simple API queries
+COPY wolfram-alpha.sh /usr/local/bin/wolfram-alpha
+RUN chmod +x /usr/local/bin/wolfram-alpha
+
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
 
