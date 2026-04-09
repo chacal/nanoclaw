@@ -59,6 +59,7 @@ Status: [x] done, [~] partial, [ ] not started
 - [x] Channel Info metadata in each channel skill (type, terminology, how-to-find-id, isolation defaults)
 - [x] /manage-channels skill (wire channels to agent groups with three isolation levels)
 - [x] Agent-shared session mode (cross-channel shared sessions, e.g. GitHub + Slack)
+- [x] Auto-onboarding on channel registration (/welcome skill triggered on first wiring)
 - [ ] Setup vs production channel separation
 - [ ] Generate visual diagram of customized instance at end of setup
 
