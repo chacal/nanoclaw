@@ -4,10 +4,7 @@ import path from 'path';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
-import {
-  cleanupOldImages,
-  getGroupImagesDir,
-} from '../group-folder.js';
+import { cleanupOldImages, getGroupImagesDir } from '../group-folder.js';
 import { logger } from '../logger.js';
 import { transcribeAudio } from '../transcription.js';
 import { registerChannel, chunkText, ChannelOpts } from './registry.js';

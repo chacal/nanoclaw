@@ -6,10 +6,7 @@ import { Api, Bot } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
-import {
-  cleanupOldImages,
-  getGroupImagesDir,
-} from '../group-folder.js';
+import { cleanupOldImages, getGroupImagesDir } from '../group-folder.js';
 import { logger } from '../logger.js';
 import { registerChannel, chunkText, ChannelOpts } from './registry.js';
 import {
