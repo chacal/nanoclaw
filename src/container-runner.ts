@@ -156,6 +156,8 @@ function buildVolumeMounts(
   if (model) {
     settings.model = model;
   }
+  settings.thinkingBudget = 'high';
+  settings.smallModelId = 'claude-sonnet-4-6';
   fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
 
   // --- .mcp.json: merge shared config + per-group overrides on every start ---
