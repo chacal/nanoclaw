@@ -770,4 +770,4 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+main().then(() => process.exit(0));
