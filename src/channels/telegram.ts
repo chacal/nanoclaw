@@ -2,7 +2,7 @@ import fs from 'fs';
 import https from 'https';
 import path from 'path';
 
-import { Api, Bot } from 'grammy';
+import { Api, Bot, InputFile } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
@@ -96,6 +96,53 @@ export async function sendPoolMessage(
     return true;
   } catch (err) {
     logger.error({ chatId, sender, err }, 'Failed to send pool message');
+    return false;
+  }
+}
+
+export async function sendPoolImage(
+  chatId: string,
+  filePath: string,
+  caption: string | undefined,
+  sender: string,
+  groupFolder: string,
+): Promise<boolean> {
+  if (poolApis.length === 0) return false;
+
+  const key = `${groupFolder}:${sender}`;
+  let idx = senderBotMap.get(key);
+  if (idx === undefined) {
+    idx = nextPoolIndex % poolApis.length;
+    nextPoolIndex++;
+    senderBotMap.set(key, idx);
+    try {
+      await poolApis[idx].setMyName(sender);
+      await new Promise((r) => setTimeout(r, 2000));
+      logger.info(
+        { sender, groupFolder, poolIndex: idx },
+        'Assigned and renamed pool bot for image',
+      );
+    } catch (err) {
+      logger.warn(
+        { sender, err },
+        'Failed to rename pool bot for image (sending anyway)',
+      );
+    }
+  }
+
+  const api = poolApis[idx];
+  try {
+    const numericId = chatId.replace(/^tg:/, '');
+    await api.sendPhoto(numericId, new InputFile(filePath), {
+      caption: caption || undefined,
+    });
+    logger.info(
+      { chatId, sender, poolIndex: idx },
+      'Pool image sent',
+    );
+    return true;
+  } catch (err) {
+    logger.error({ chatId, sender, err }, 'Failed to send pool image');
     return false;
   }
 }
@@ -410,6 +457,23 @@ export class TelegramChannel implements Channel {
       logger.info({ jid, length: text.length }, 'Telegram message sent');
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram message');
+    }
+  }
+
+  async sendImage(jid: string, filePath: string, caption?: string): Promise<void> {
+    if (!this.bot) {
+      logger.warn('Telegram bot not initialized');
+      return;
+    }
+
+    try {
+      const numericId = jid.replace(/^tg:/, '');
+      await this.bot.api.sendPhoto(numericId, new InputFile(filePath), {
+        caption: caption || undefined,
+      });
+      logger.info({ jid, filePath }, 'Telegram image sent');
+    } catch (err) {
+      logger.error({ jid, err }, 'Failed to send Telegram image');
     }
   }
 

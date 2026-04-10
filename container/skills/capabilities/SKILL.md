@@ -45,6 +45,7 @@ Read the allowed tools from your SDK configuration. You always have access to:
 
 The NanoClaw MCP server exposes these tools (via `mcp__nanoclaw__*` prefix):
 - `send_message` — send a message to the user/group
+- `send_image` — send an image file to the user/group
 - `schedule_task` — schedule a recurring or one-time task
 - `list_tasks` — list scheduled tasks
 - `pause_task` — pause a scheduled task
@@ -84,7 +85,7 @@ Present the report as a clean, readable message. Example:
 • Core: Bash, Read, Write, Edit, Glob, Grep
 • Web: WebSearch, WebFetch
 • Orchestration: Task, TeamCreate, SendMessage
-• MCP: send_message, schedule_task, list_tasks, pause/resume/cancel/update_task, register_group
+• MCP: send_message, send_image, schedule_task, list_tasks, pause/resume/cancel/update_task, register_group
 
 *Container Tools:*
 • agent-browser: ✓

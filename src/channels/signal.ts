@@ -471,6 +471,31 @@ export class SignalChannel implements Channel {
     }
   }
 
+  async sendImage(jid: string, filePath: string, caption?: string): Promise<void> {
+    if (!this.proc) {
+      logger.warn('Signal not connected');
+      return;
+    }
+
+    try {
+      const params: any = {
+        ...this.recipientParams(jid),
+        attachment: [filePath],
+      };
+      if (caption) {
+        const { text: plainText, styles } = parseFormatting(caption);
+        params.message = plainText;
+        if (styles.length > 0) {
+          params.textStyle = styles;
+        }
+      }
+      await this.sendRpc('send', params);
+      logger.info({ jid, filePath }, 'Signal image sent');
+    } catch (err) {
+      logger.error({ jid, err }, 'Failed to send Signal image');
+    }
+  }
+
   isConnected(): boolean {
     return this.connected && this.proc !== null && !this.proc.killed;
   }

@@ -63,6 +63,51 @@ server.tool(
 );
 
 server.tool(
+  'send_image',
+  'Send an image to the user or group. The image must be a file within /workspace/group/ (e.g., /workspace/group/images/chart.png). Optionally include a caption.',
+  {
+    image_path: z.string().describe('Path to the image file within /workspace/group/ (e.g., "/workspace/group/images/chart.png" or "images/chart.png")'),
+    caption: z.string().optional().describe('Optional caption text to send with the image'),
+    sender: z.string().optional().describe('Your role/identity name (e.g. "Researcher"). When set, images appear from a dedicated bot in Telegram.'),
+  },
+  async (args) => {
+    // Normalize: strip /workspace/group/ prefix to get relative path
+    let relativePath = args.image_path;
+    if (relativePath.startsWith('/workspace/group/')) {
+      relativePath = relativePath.slice('/workspace/group/'.length);
+    } else if (relativePath.startsWith('/')) {
+      return {
+        content: [{ type: 'text' as const, text: 'Image path must be within /workspace/group/. Got: ' + args.image_path }],
+        isError: true,
+      };
+    }
+
+    // Verify file exists in container
+    const fullPath = path.join('/workspace/group', relativePath);
+    if (!fs.existsSync(fullPath)) {
+      return {
+        content: [{ type: 'text' as const, text: 'Image file not found: ' + fullPath }],
+        isError: true,
+      };
+    }
+
+    const data: Record<string, string | undefined> = {
+      type: 'image',
+      chatJid,
+      imagePath: relativePath,
+      caption: args.caption || undefined,
+      sender: args.sender || undefined,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return { content: [{ type: 'text' as const, text: 'Image sent.' }] };
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
 

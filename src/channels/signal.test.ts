@@ -1033,6 +1033,115 @@ describe('SignalChannel', () => {
     });
   });
 
+  // --- sendImage ---
+
+  describe('sendImage', () => {
+    async function connectChannel() {
+      const opts = createTestOpts();
+      const channel = new SignalChannel('+15559999999', 'signal-cli', opts);
+      const connectPromise = channel.connect();
+      vi.advanceTimersByTime(1000);
+      await connectPromise;
+      // Resolve the prefillNameCache listContacts RPC and drain stdin
+      await vi.advanceTimersByTimeAsync(0);
+      emitJsonLine(fakeProc, { id: 1, result: [] });
+      await vi.advanceTimersByTimeAsync(0);
+      fakeProc.stdin.read();
+      return { channel, proc: fakeProc };
+    }
+
+    it('sends RPC with attachment and caption', async () => {
+      const { channel, proc } = await connectChannel();
+
+      const written: string[] = [];
+      proc.stdin.on('data', (chunk: Buffer) => written.push(chunk.toString()));
+
+      const sendPromise = channel.sendImage(
+        'signal:+15551234567',
+        '/tmp/test.png',
+        'Hello **bold** caption',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      const rpc = JSON.parse(written.join('').trim());
+      expect(rpc.method).toBe('send');
+      expect(rpc.params.attachment).toEqual(['/tmp/test.png']);
+      expect(rpc.params.message).toBe('Hello bold caption');
+      expect(rpc.params.textStyle).toEqual(['6:4:BOLD']);
+      expect(rpc.params.recipient).toEqual(['+15551234567']);
+
+      emitJsonLine(proc, { id: rpc.id, result: {} });
+      await sendPromise;
+    });
+
+    it('sends RPC with attachment only (no caption)', async () => {
+      const { channel, proc } = await connectChannel();
+
+      const written: string[] = [];
+      proc.stdin.on('data', (chunk: Buffer) => written.push(chunk.toString()));
+
+      const sendPromise = channel.sendImage(
+        'signal:+15551234567',
+        '/tmp/test.png',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      const rpc = JSON.parse(written.join('').trim());
+      expect(rpc.method).toBe('send');
+      expect(rpc.params.attachment).toEqual(['/tmp/test.png']);
+      expect(rpc.params.message).toBeUndefined();
+      expect(rpc.params.textStyle).toBeUndefined();
+
+      emitJsonLine(proc, { id: rpc.id, result: {} });
+      await sendPromise;
+    });
+
+    it('sends to group using groupId', async () => {
+      const { channel, proc } = await connectChannel();
+
+      const written: string[] = [];
+      proc.stdin.on('data', (chunk: Buffer) => written.push(chunk.toString()));
+
+      const sendPromise = channel.sendImage(
+        'signal:my-group-id',
+        '/tmp/test.png',
+        'Group photo',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      const rpc = JSON.parse(written.join('').trim());
+      expect(rpc.params.groupId).toBe('my-group-id');
+      expect(rpc.params.recipient).toBeUndefined();
+      expect(rpc.params.attachment).toEqual(['/tmp/test.png']);
+
+      emitJsonLine(proc, { id: rpc.id, result: {} });
+      await sendPromise;
+    });
+
+    it('handles error gracefully', async () => {
+      const { channel, proc } = await connectChannel();
+
+      const sendPromise = channel.sendImage(
+        'signal:+15551234567',
+        '/tmp/test.png',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Read the RPC request
+      const data = proc.stdin.read();
+      const rpc = JSON.parse(data.toString().trim());
+
+      // Respond with error
+      emitJsonLine(proc, {
+        id: rpc.id,
+        error: { message: 'File not found' },
+      });
+
+      // Should not throw
+      await sendPromise;
+    });
+  });
+
   // --- setTyping ---
 
   describe('setTyping', () => {

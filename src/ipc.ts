@@ -4,15 +4,16 @@ import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
-import { sendPoolMessage } from './channels/telegram.js';
+import { sendPoolImage, sendPoolMessage } from './channels/telegram.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
-import { isValidGroupFolder } from './group-folder.js';
+import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendImage: (jid: string, filePath: string, caption?: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -132,6 +133,91 @@ async function processMessageIpc(
   );
 }
 
+/**
+ * Resolve a container-relative image path to a host filesystem path.
+ * The container agent provides paths relative to /workspace/group/ (e.g. "images/photo.png").
+ * Returns null if the path escapes the group directory or the file doesn't exist.
+ */
+export function resolveImagePath(
+  sourceFolder: string,
+  relativePath: string,
+): string | null {
+  let groupDir: string;
+  try {
+    groupDir = resolveGroupFolderPath(sourceFolder);
+  } catch {
+    logger.warn({ sourceFolder }, 'Invalid group folder for image path');
+    return null;
+  }
+  const resolved = path.resolve(groupDir, relativePath);
+  const rel = path.relative(groupDir, resolved);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    logger.warn(
+      { sourceFolder, relativePath },
+      'Image path escapes group directory',
+    );
+    return null;
+  }
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+    logger.warn({ resolved }, 'Image file not found');
+    return null;
+  }
+  return resolved;
+}
+
+/**
+ * Process a single parsed IPC image message: authorize, resolve path, and send.
+ */
+export async function processImageIpc(
+  data: any,
+  sourceFolder: string,
+  isMain: boolean,
+  registeredGroups: Record<string, RegisteredGroup>,
+  deps: Pick<IpcDeps, 'sendImage'>,
+): Promise<void> {
+  if (
+    data.type !== 'image' ||
+    typeof data.chatJid !== 'string' ||
+    typeof data.imagePath !== 'string'
+  ) {
+    return;
+  }
+
+  const targetGroup = registeredGroups[data.chatJid];
+  if (!isMain && !(targetGroup && targetGroup.folder === sourceFolder)) {
+    logger.warn(
+      { chatJid: data.chatJid, sourceFolder },
+      'Unauthorized IPC image attempt blocked',
+    );
+    return;
+  }
+
+  const hostPath = resolveImagePath(sourceFolder, data.imagePath);
+  if (!hostPath) return;
+
+  const caption = typeof data.caption === 'string' ? data.caption : undefined;
+
+  if (data.sender && data.chatJid.startsWith('tg:')) {
+    const sent = await sendPoolImage(
+      data.chatJid,
+      hostPath,
+      caption,
+      data.sender,
+      sourceFolder,
+    );
+    if (!sent) {
+      await deps.sendImage(data.chatJid, hostPath, caption);
+    }
+  } else {
+    await deps.sendImage(data.chatJid, hostPath, caption);
+  }
+
+  logger.info(
+    { chatJid: data.chatJid, sourceFolder, imagePath: data.imagePath },
+    'IPC image sent',
+  );
+}
+
 const ERROR_FILE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 /** Delete error files older than ERROR_FILE_MAX_AGE_MS. Best-effort. */
@@ -204,13 +290,23 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              await processMessageIpc(
-                data,
-                sourceFolder,
-                isMain,
-                registeredGroups,
-                deps,
-              );
+              if (data.type === 'image') {
+                await processImageIpc(
+                  data,
+                  sourceFolder,
+                  isMain,
+                  registeredGroups,
+                  deps,
+                );
+              } else {
+                await processMessageIpc(
+                  data,
+                  sourceFolder,
+                  isMain,
+                  registeredGroups,
+                  deps,
+                );
+              }
               fs.unlinkSync(filePath);
             } catch (err) {
               logger.error(

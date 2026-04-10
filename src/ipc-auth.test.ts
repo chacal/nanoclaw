@@ -1,4 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import fs from 'fs';
+import path from 'path';
 
 import {
   _initTestDatabase,
@@ -8,7 +10,12 @@ import {
   getTaskById,
   setRegisteredGroup,
 } from './db.js';
-import { processTaskIpc, IpcDeps } from './ipc.js';
+import {
+  processTaskIpc,
+  processImageIpc,
+  resolveImagePath,
+  IpcDeps,
+} from './ipc.js';
 import { RegisteredGroup } from './types.js';
 
 // Set up registered groups used across tests
@@ -53,6 +60,7 @@ beforeEach(() => {
 
   deps = {
     sendMessage: async () => {},
+    sendImage: async () => {},
     registeredGroups: () => groups,
     registerGroup: (jid, group) => {
       groups[jid] = group;
@@ -675,5 +683,173 @@ describe('register_group success', () => {
     );
 
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
+  });
+});
+
+// --- processImageIpc authorization ---
+
+describe('processImageIpc authorization', () => {
+  let sendImageMock: IpcDeps['sendImage'];
+
+  beforeEach(() => {
+    sendImageMock = vi.fn<IpcDeps['sendImage']>(async () => {});
+  });
+
+  // Helper to create a temp image file for a group folder
+  function createTempImage(groupFolder: string): {
+    relativePath: string;
+    cleanup: () => void;
+  } {
+    const groupDir = path.resolve('groups', groupFolder);
+    const imagesDir = path.join(groupDir, 'images');
+    fs.mkdirSync(imagesDir, { recursive: true });
+    const filename = `test-${Date.now()}.png`;
+    const filePath = path.join(imagesDir, filename);
+    // Write a minimal valid file
+    fs.writeFileSync(filePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    return {
+      relativePath: `images/${filename}`,
+      cleanup: () => {
+        try {
+          fs.unlinkSync(filePath);
+        } catch {
+          /* ignore */
+        }
+      },
+    };
+  }
+
+  it('main group can send image to any group', async () => {
+    const img = createTempImage(MAIN_GROUP.folder);
+    try {
+      await processImageIpc(
+        {
+          type: 'image',
+          chatJid: 'other@g.us',
+          imagePath: img.relativePath,
+        },
+        'whatsapp_main',
+        true,
+        groups,
+        { sendImage: sendImageMock },
+      );
+      expect(sendImageMock).toHaveBeenCalledOnce();
+    } finally {
+      img.cleanup();
+    }
+  });
+
+  it('non-main group can send image to its own chat', async () => {
+    const img = createTempImage(OTHER_GROUP.folder);
+    try {
+      await processImageIpc(
+        {
+          type: 'image',
+          chatJid: 'other@g.us',
+          imagePath: img.relativePath,
+        },
+        'other-group',
+        false,
+        groups,
+        { sendImage: sendImageMock },
+      );
+      expect(sendImageMock).toHaveBeenCalledOnce();
+    } finally {
+      img.cleanup();
+    }
+  });
+
+  it('non-main group cannot send image to another group', async () => {
+    const img = createTempImage(OTHER_GROUP.folder);
+    try {
+      await processImageIpc(
+        {
+          type: 'image',
+          chatJid: 'main@g.us',
+          imagePath: img.relativePath,
+        },
+        'other-group',
+        false,
+        groups,
+        { sendImage: sendImageMock },
+      );
+      expect(sendImageMock).not.toHaveBeenCalled();
+    } finally {
+      img.cleanup();
+    }
+  });
+
+  it('rejects missing imagePath field', async () => {
+    await processImageIpc(
+      {
+        type: 'image',
+        chatJid: 'main@g.us',
+      },
+      'whatsapp_main',
+      true,
+      groups,
+      { sendImage: sendImageMock },
+    );
+    expect(sendImageMock).not.toHaveBeenCalled();
+  });
+
+  it('passes caption through to sendImage', async () => {
+    const img = createTempImage(MAIN_GROUP.folder);
+    try {
+      await processImageIpc(
+        {
+          type: 'image',
+          chatJid: 'main@g.us',
+          imagePath: img.relativePath,
+          caption: 'Hello caption',
+        },
+        'whatsapp_main',
+        true,
+        groups,
+        { sendImage: sendImageMock },
+      );
+      expect(sendImageMock).toHaveBeenCalledWith(
+        'main@g.us',
+        expect.stringContaining('images/'),
+        'Hello caption',
+      );
+    } finally {
+      img.cleanup();
+    }
+  });
+});
+
+// --- resolveImagePath ---
+
+describe('resolveImagePath', () => {
+  it('rejects path traversal attempts', () => {
+    expect(resolveImagePath('whatsapp_main', '../../../etc/passwd')).toBeNull();
+  });
+
+  it('rejects path with embedded ..', () => {
+    expect(
+      resolveImagePath('whatsapp_main', 'images/../../outside.png'),
+    ).toBeNull();
+  });
+
+  it('rejects non-existent file', () => {
+    expect(
+      resolveImagePath('whatsapp_main', 'images/nonexistent.png'),
+    ).toBeNull();
+  });
+
+  it('resolves valid image path', () => {
+    const groupDir = path.resolve('groups', 'whatsapp_main');
+    const imagesDir = path.join(groupDir, 'images');
+    fs.mkdirSync(imagesDir, { recursive: true });
+    const filePath = path.join(imagesDir, 'test-resolve.png');
+    fs.writeFileSync(filePath, Buffer.from([0x89, 0x50]));
+
+    try {
+      const result = resolveImagePath('whatsapp_main', 'images/test-resolve.png');
+      expect(result).toBe(filePath);
+    } finally {
+      fs.unlinkSync(filePath);
+    }
   });
 });
