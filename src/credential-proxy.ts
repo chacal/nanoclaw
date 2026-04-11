@@ -33,6 +33,23 @@ const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const OAUTH_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token';
 const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000; // Refresh 5 minutes before expiry
 
+/**
+ * Decode percent-encoded characters in the path portion of a URL.
+ * Query string is excluded — only the path is decoded.
+ * This prevents bypasses where %2e%2e encodes '..' but path.posix.normalize
+ * doesn't decode percent-encoding, so the allowlist check would pass while
+ * the upstream server decodes and resolves the traversal.
+ */
+function decodePath(url: string): string {
+  const qIdx = url.indexOf('?');
+  const pathPart = qIdx >= 0 ? url.slice(0, qIdx) : url;
+  try {
+    return decodeURIComponent(pathPart);
+  } catch {
+    return pathPart; // malformed encoding — use as-is, will fail allowlist
+  }
+}
+
 // Only allow API paths that containers legitimately need.
 // Blocks access to billing, admin, and other sensitive endpoints.
 const ALLOWED_PATH_PREFIXES = [
@@ -293,7 +310,8 @@ export function startCredentialProxy(
 
   if (secrets.WOLFRAM_APP_ID) {
     const wolframAppId = secrets.WOLFRAM_APP_ID;
-    const wolframUpstream = secrets.WOLFRAM_URL || 'https://api.wolframalpha.com';
+    const wolframUpstream =
+      secrets.WOLFRAM_URL || 'https://api.wolframalpha.com';
     serviceRoutes.push({
       prefix: '/wolfram',
       upstream: new URL(wolframUpstream),
@@ -314,8 +332,6 @@ export function startCredentialProxy(
   const upstreamUrl = new URL(
     secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
   );
-  const isHttps = upstreamUrl.protocol === 'https:';
-  const makeRequest = isHttps ? httpsRequest : httpRequest;
 
   // --- Shared helper: prepare headers for proxying ---
   function prepareHeaders(
@@ -363,7 +379,9 @@ export function startCredentialProxy(
     );
 
     upstream.on('error', (err) => {
-      logger.error({ err, path: upstreamPath }, `${logContext} upstream error`);
+      // Strip query string from logged path to avoid leaking secrets (e.g. Wolfram appid)
+      const logPath = upstreamPath.split('?')[0];
+      logger.error({ err, path: logPath }, `${logContext} upstream error`);
       if (!res.headersSent) {
         res.writeHead(502);
         res.end('Bad Gateway');
@@ -379,8 +397,15 @@ export function startCredentialProxy(
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', async () => {
-        const normalizedPath = path.posix.normalize(req.url || '/');
+        const rawUrl = req.url || '/';
+        // Decode percent-encoded path chars before normalization to prevent
+        // bypasses like %2e%2e encoding '..' (see decodePath doc).
+        const normalizedPath = path.posix.normalize(decodePath(rawUrl));
         const body = Buffer.concat(chunks);
+
+        // Extract query string from raw URL to re-append after path processing
+        const qIdx = rawUrl.indexOf('?');
+        const queryString = qIdx >= 0 ? rawUrl.slice(qIdx) : '';
 
         // --- Try service routes first (path-prefix based) ---
         const matchedRoute = serviceRoutes.find((r) =>
@@ -402,19 +427,15 @@ export function startCredentialProxy(
             return;
           }
 
-          const headers = prepareHeaders(
-            req,
-            matchedRoute.upstream.host,
-            body,
-          );
+          const headers = prepareHeaders(req, matchedRoute.upstream.host, body);
           matchedRoute.injectCredentials(headers);
 
-          // Use raw URL (not normalized) for the stripped portion to preserve
-          // query strings, then apply optional transform (e.g. inject appid).
-          const rawStripped = (req.url || '/').slice(matchedRoute.prefix.length);
+          // Forward the decoded+normalized stripped path with query string.
+          // This ensures what we checked is what we forward — no raw URL bypass.
+          const strippedWithQuery = strippedPath + queryString;
           const upstreamPath = matchedRoute.transformPath
-            ? matchedRoute.transformPath(rawStripped)
-            : rawStripped;
+            ? matchedRoute.transformPath(strippedWithQuery)
+            : strippedWithQuery;
 
           forwardRequest(
             matchedRoute.upstream,
@@ -461,7 +482,7 @@ export function startCredentialProxy(
 
         forwardRequest(
           upstreamUrl,
-          req.url || '/',
+          normalizedPath + queryString,
           req.method || 'GET',
           headers,
           body,
