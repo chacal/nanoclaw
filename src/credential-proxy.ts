@@ -42,6 +42,21 @@ const ALLOWED_PATH_PREFIXES = [
   '/api/auth/',
 ];
 
+interface ServiceRoute {
+  /** URL prefix that selects this route (e.g., '/ha', '/wolfram') */
+  prefix: string;
+  /** Upstream base URL */
+  upstream: URL;
+  /** Allowed path prefixes AFTER the service prefix is stripped */
+  allowedPaths: string[];
+  /** Mutate headers to inject credentials */
+  injectCredentials: (
+    headers: Record<string, string | number | string[] | undefined>,
+  ) => void;
+  /** Optional: transform the upstream path (e.g., inject query params) */
+  transformPath?: (path: string) => string;
+}
+
 interface OAuthCredentials {
   accessToken: string;
   refreshToken: string;
@@ -236,6 +251,10 @@ export function startCredentialProxy(
     'ANTHROPIC_AUTH_TOKEN',
     'ANTHROPIC_BASE_URL',
     'CLAUDE_CREDENTIALS_FILE',
+    'HA_URL',
+    'HA_TOKEN',
+    'WOLFRAM_APP_ID',
+    'WOLFRAM_URL',
   ]);
 
   const authMode: AuthMode = secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
@@ -255,6 +274,40 @@ export function startCredentialProxy(
     }
   }
 
+  // --- Service routes: path-prefix-based routing for non-Anthropic services ---
+  const serviceRoutes: ServiceRoute[] = [];
+
+  if (secrets.HA_URL && secrets.HA_TOKEN) {
+    const haToken = secrets.HA_TOKEN;
+    serviceRoutes.push({
+      prefix: '/ha',
+      upstream: new URL(secrets.HA_URL),
+      allowedPaths: ['/api/'],
+      injectCredentials: (headers) => {
+        delete headers['authorization'];
+        headers['authorization'] = `Bearer ${haToken}`;
+      },
+    });
+    logger.info({ upstream: secrets.HA_URL }, 'HA service route registered');
+  }
+
+  if (secrets.WOLFRAM_APP_ID) {
+    const wolframAppId = secrets.WOLFRAM_APP_ID;
+    const wolframUpstream = secrets.WOLFRAM_URL || 'https://api.wolframalpha.com';
+    serviceRoutes.push({
+      prefix: '/wolfram',
+      upstream: new URL(wolframUpstream),
+      allowedPaths: ['/v1/'],
+      injectCredentials: () => {},
+      transformPath: (p) => {
+        const url = new URL(p, 'http://dummy');
+        url.searchParams.set('appid', wolframAppId);
+        return url.pathname + url.search;
+      },
+    });
+    logger.info('Wolfram service route registered');
+  }
+
   const staticOAuthToken =
     secrets.CLAUDE_CODE_OAUTH_TOKEN || secrets.ANTHROPIC_AUTH_TOKEN || '';
 
@@ -264,31 +317,129 @@ export function startCredentialProxy(
   const isHttps = upstreamUrl.protocol === 'https:';
   const makeRequest = isHttps ? httpsRequest : httpRequest;
 
+  // --- Shared helper: prepare headers for proxying ---
+  function prepareHeaders(
+    req: import('http').IncomingMessage,
+    targetHost: string,
+    body: Buffer,
+  ): Record<string, string | number | string[] | undefined> {
+    const headers: Record<string, string | number | string[] | undefined> = {
+      ...(req.headers as Record<string, string>),
+      host: targetHost,
+      'content-length': body.length,
+    };
+    // Strip hop-by-hop headers that must not be forwarded by proxies
+    delete headers['connection'];
+    delete headers['keep-alive'];
+    delete headers['transfer-encoding'];
+    return headers;
+  }
+
+  // --- Shared helper: forward request to upstream and pipe response ---
+  function forwardRequest(
+    targetUrl: URL,
+    upstreamPath: string,
+    method: string,
+    headers: Record<string, string | number | string[] | undefined>,
+    body: Buffer,
+    res: import('http').ServerResponse,
+    logContext: string,
+  ): void {
+    const targetIsHttps = targetUrl.protocol === 'https:';
+    const doRequest = targetIsHttps ? httpsRequest : httpRequest;
+
+    const upstream = doRequest(
+      {
+        hostname: targetUrl.hostname,
+        port: targetUrl.port || (targetIsHttps ? 443 : 80),
+        path: upstreamPath,
+        method,
+        headers,
+      } as RequestOptions,
+      (upRes) => {
+        res.writeHead(upRes.statusCode!, upRes.headers);
+        upRes.pipe(res);
+      },
+    );
+
+    upstream.on('error', (err) => {
+      logger.error({ err, path: upstreamPath }, `${logContext} upstream error`);
+      if (!res.headersSent) {
+        res.writeHead(502);
+        res.end('Bad Gateway');
+      }
+    });
+
+    upstream.write(body);
+    upstream.end();
+  }
+
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', async () => {
-        const reqPath = path.posix.normalize(req.url || '/');
-        if (!ALLOWED_PATH_PREFIXES.some((p) => reqPath.startsWith(p))) {
-          logger.warn({ path: reqPath }, 'Blocked request to disallowed path');
+        const normalizedPath = path.posix.normalize(req.url || '/');
+        const body = Buffer.concat(chunks);
+
+        // --- Try service routes first (path-prefix based) ---
+        const matchedRoute = serviceRoutes.find((r) =>
+          normalizedPath.startsWith(r.prefix + '/'),
+        );
+
+        if (matchedRoute) {
+          const strippedPath = normalizedPath.slice(matchedRoute.prefix.length);
+
+          if (
+            !matchedRoute.allowedPaths.some((p) => strippedPath.startsWith(p))
+          ) {
+            logger.warn(
+              { path: normalizedPath, service: matchedRoute.prefix },
+              'Blocked request to disallowed service path',
+            );
+            res.writeHead(403);
+            res.end('Forbidden');
+            return;
+          }
+
+          const headers = prepareHeaders(
+            req,
+            matchedRoute.upstream.host,
+            body,
+          );
+          matchedRoute.injectCredentials(headers);
+
+          // Use raw URL (not normalized) for the stripped portion to preserve
+          // query strings, then apply optional transform (e.g. inject appid).
+          const rawStripped = (req.url || '/').slice(matchedRoute.prefix.length);
+          const upstreamPath = matchedRoute.transformPath
+            ? matchedRoute.transformPath(rawStripped)
+            : rawStripped;
+
+          forwardRequest(
+            matchedRoute.upstream,
+            upstreamPath,
+            req.method || 'GET',
+            headers,
+            body,
+            res,
+            `Service ${matchedRoute.prefix}`,
+          );
+          return;
+        }
+
+        // --- Default: Anthropic proxy (existing logic, unchanged) ---
+        if (!ALLOWED_PATH_PREFIXES.some((p) => normalizedPath.startsWith(p))) {
+          logger.warn(
+            { path: normalizedPath },
+            'Blocked request to disallowed path',
+          );
           res.writeHead(403);
           res.end('Forbidden');
           return;
         }
 
-        const body = Buffer.concat(chunks);
-        const headers: Record<string, string | number | string[] | undefined> =
-          {
-            ...(req.headers as Record<string, string>),
-            host: upstreamUrl.host,
-            'content-length': body.length,
-          };
-
-        // Strip hop-by-hop headers that must not be forwarded by proxies
-        delete headers['connection'];
-        delete headers['keep-alive'];
-        delete headers['transfer-encoding'];
+        const headers = prepareHeaders(req, upstreamUrl.host, body);
 
         if (authMode === 'api-key') {
           // API key mode: inject x-api-key on every request
@@ -308,33 +459,15 @@ export function startCredentialProxy(
           }
         }
 
-        const upstream = makeRequest(
-          {
-            hostname: upstreamUrl.hostname,
-            port: upstreamUrl.port || (isHttps ? 443 : 80),
-            path: req.url,
-            method: req.method,
-            headers,
-          } as RequestOptions,
-          (upRes) => {
-            res.writeHead(upRes.statusCode!, upRes.headers);
-            upRes.pipe(res);
-          },
+        forwardRequest(
+          upstreamUrl,
+          req.url || '/',
+          req.method || 'GET',
+          headers,
+          body,
+          res,
+          'Credential proxy',
         );
-
-        upstream.on('error', (err) => {
-          logger.error(
-            { err, url: req.url },
-            'Credential proxy upstream error',
-          );
-          if (!res.headersSent) {
-            res.writeHead(502);
-            res.end('Bad Gateway');
-          }
-        });
-
-        upstream.write(body);
-        upstream.end();
       });
     });
 
