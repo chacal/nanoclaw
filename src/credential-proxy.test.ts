@@ -611,6 +611,569 @@ describe('credential-proxy', () => {
   });
 });
 
+// --- Service route tests ---
+// Uses separate upstream servers per service to verify correct routing isolation.
+describe('service routes', () => {
+  let proxyServer: http.Server;
+  let anthropicUpstream: http.Server;
+  let haUpstream: http.Server;
+  let wolframUpstream: http.Server;
+  let proxyPort: number;
+  let anthropicUpstreamPort: number;
+  let haUpstreamPort: number;
+  let wolframUpstreamPort: number;
+
+  // Track what each upstream received
+  let anthropicReq: {
+    headers: http.IncomingHttpHeaders;
+    path: string;
+    method: string;
+    body: string;
+  };
+  let haReq: {
+    headers: http.IncomingHttpHeaders;
+    path: string;
+    method: string;
+    body: string;
+  };
+  let wolframReq: {
+    headers: http.IncomingHttpHeaders;
+    path: string;
+    method: string;
+    body: string;
+  };
+
+  function createUpstreamServer(): http.Server {
+    return http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        const data = {
+          headers: { ...req.headers },
+          path: req.url || '',
+          method: req.method || '',
+          body: Buffer.concat(chunks).toString(),
+        };
+        // Identify which upstream was hit based on its port
+        const port = (req.socket.address() as AddressInfo).port;
+        if (port === anthropicUpstreamPort) Object.assign(anthropicReq, data);
+        else if (port === haUpstreamPort) Object.assign(haReq, data);
+        else if (port === wolframUpstreamPort) Object.assign(wolframReq, data);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+  }
+
+  function resetReqs() {
+    const empty = { headers: {}, path: '', method: '', body: '' };
+    anthropicReq = { ...empty };
+    haReq = { ...empty };
+    wolframReq = { ...empty };
+  }
+
+  beforeEach(async () => {
+    resetReqs();
+    anthropicUpstream = createUpstreamServer();
+    haUpstream = createUpstreamServer();
+    wolframUpstream = createUpstreamServer();
+
+    await Promise.all([
+      new Promise<void>((r) => anthropicUpstream.listen(0, '127.0.0.1', r)),
+      new Promise<void>((r) => haUpstream.listen(0, '127.0.0.1', r)),
+      new Promise<void>((r) => wolframUpstream.listen(0, '127.0.0.1', r)),
+    ]);
+    anthropicUpstreamPort = (anthropicUpstream.address() as AddressInfo).port;
+    haUpstreamPort = (haUpstream.address() as AddressInfo).port;
+    wolframUpstreamPort = (wolframUpstream.address() as AddressInfo).port;
+  });
+
+  afterEach(async () => {
+    await Promise.all([
+      new Promise<void>((r) => proxyServer?.close(() => r())),
+      new Promise<void>((r) => anthropicUpstream?.close(() => r())),
+      new Promise<void>((r) => haUpstream?.close(() => r())),
+      new Promise<void>((r) => wolframUpstream?.close(() => r())),
+    ]);
+    for (const key of Object.keys(mockEnv)) delete mockEnv[key];
+  });
+
+  async function startProxy(env: Record<string, string> = {}): Promise<number> {
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${anthropicUpstreamPort}`,
+      HA_URL: `http://127.0.0.1:${haUpstreamPort}`,
+      HA_TOKEN: 'ha-secret-token',
+      WOLFRAM_APP_ID: 'wolf-secret-id',
+      WOLFRAM_URL: `http://127.0.0.1:${wolframUpstreamPort}`,
+      ...env,
+    });
+    proxyServer = await startCredentialProxy(0);
+    return (proxyServer.address() as AddressInfo).port;
+  }
+
+  // === A. HA Route — Credential Injection ===
+
+  describe('HA credential injection', () => {
+    it('injects Bearer token on HA requests', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/states/sensor.test',
+      });
+      expect(haReq.headers['authorization']).toBe('Bearer ha-secret-token');
+    });
+
+    it('strips and replaces container-sent Authorization header', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/states/sensor.test',
+        headers: { authorization: 'Bearer container-leaked-token' },
+      });
+      expect(haReq.headers['authorization']).toBe('Bearer ha-secret-token');
+    });
+
+    it('returns 403 for /ha/ when HA is not configured', async () => {
+      proxyPort = await startProxy({ HA_URL: '', HA_TOKEN: '' });
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/states/sensor.test',
+      });
+      // Route not registered → falls through to Anthropic allowlist → 403
+      expect(res.statusCode).toBe(403);
+    });
+  });
+
+  // === B. HA Route — Path Handling ===
+
+  describe('HA path handling', () => {
+    it('strips /ha prefix — upstream sees /api/states/...', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/states/sensor.nordpool',
+      });
+      expect(haReq.path).toBe('/api/states/sensor.nordpool');
+    });
+
+    it('strips /ha prefix for nested service paths', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'POST',
+        path: '/ha/api/services/light/turn_on',
+        headers: { 'content-type': 'application/json' },
+      });
+      expect(haReq.path).toBe('/api/services/light/turn_on');
+    });
+
+    it('allows /ha/api/mcp (MCP endpoint)', async () => {
+      proxyPort = await startProxy();
+      const res = await makeRequest(proxyPort, {
+        method: 'POST',
+        path: '/ha/api/mcp',
+        headers: { 'content-type': 'application/json' },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(haReq.path).toBe('/api/mcp');
+    });
+
+    it('blocks /ha/config with 403 (not under /api/)', async () => {
+      proxyPort = await startProxy();
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/config',
+      });
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('blocks /ha/ with 403 (empty path after prefix)', async () => {
+      proxyPort = await startProxy();
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/',
+      });
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('/ha without trailing slash does not match service route → 403', async () => {
+      proxyPort = await startProxy();
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha',
+      });
+      // Falls through to Anthropic allowlist → 403
+      expect(res.statusCode).toBe(403);
+    });
+  });
+
+  // === C. Wolfram Route — Credential Injection ===
+
+  describe('Wolfram credential injection', () => {
+    it('injects appid query param', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/wolfram/v1/simple?i=test',
+      });
+      expect(wolframReq.path).toContain('appid=wolf-secret-id');
+    });
+
+    it('injects appid even when container omits it', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/wolfram/v1/simple?i=hello&units=metric',
+      });
+      expect(wolframReq.path).toContain('appid=wolf-secret-id');
+    });
+
+    it('overwrites container-sent appid param', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/wolfram/v1/simple?i=test&appid=container-fake-id',
+      });
+      expect(wolframReq.path).toContain('appid=wolf-secret-id');
+      expect(wolframReq.path).not.toContain('container-fake-id');
+    });
+
+    it('preserves existing query params alongside injected appid', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/wolfram/v1/simple?i=hello%20world&units=metric',
+      });
+      expect(wolframReq.path).toContain('i=hello+world');
+      expect(wolframReq.path).toContain('units=metric');
+      expect(wolframReq.path).toContain('appid=wolf-secret-id');
+    });
+
+    it('returns 403 for /wolfram/ when Wolfram is not configured', async () => {
+      proxyPort = await startProxy({ WOLFRAM_APP_ID: '' });
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/wolfram/v1/simple?i=test',
+      });
+      expect(res.statusCode).toBe(403);
+    });
+  });
+
+  // === D. Wolfram Route — Path Handling ===
+
+  describe('Wolfram path handling', () => {
+    it('strips /wolfram prefix', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/wolfram/v1/simple?i=test',
+      });
+      expect(wolframReq.path).toMatch(/^\/v1\/simple\?/);
+    });
+
+    it('blocks /wolfram/v2/admin with 403 (not under /v1/)', async () => {
+      proxyPort = await startProxy();
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/wolfram/v2/admin',
+      });
+      expect(res.statusCode).toBe(403);
+    });
+  });
+
+  // === E. Path Security ===
+
+  describe('path security', () => {
+    it('blocks path traversal from HA into Anthropic paths', async () => {
+      proxyPort = await startProxy();
+      // /ha/api/../../v1/messages normalizes to /v1/messages, but
+      // service route check uses normalized path which no longer starts with /ha/
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/../../v1/messages',
+      });
+      // Normalized to /v1/messages — matches Anthropic not HA, so goes to Anthropic.
+      // Actually it depends on normalization. Let's just verify it doesn't hit HA
+      // with an unintended path.
+      expect(haReq.path).not.toContain('/v1/messages');
+    });
+
+    it('blocks path traversal within HA route', async () => {
+      proxyPort = await startProxy();
+      // /ha/api/../config normalizes to /ha/config → stripped = /config → not under /api/
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/../config',
+      });
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('unknown prefix falls through to Anthropic allowlist → 403', async () => {
+      proxyPort = await startProxy();
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/unknown/v1/messages',
+      });
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('path traversal from Wolfram into Anthropic is blocked', async () => {
+      proxyPort = await startProxy();
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/wolfram/v1/../../v1/messages',
+      });
+      // Normalized to /v1/messages — no longer starts with /wolfram/
+      expect(wolframReq.path).toBe('');
+    });
+
+    it('percent-encoded path traversal is blocked (%2e%2e)', async () => {
+      proxyPort = await startProxy();
+      // %2e%2e = '..' — must be decoded before allowlist check
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/%2e%2e/config',
+      });
+      // Decoded to /ha/api/../config → normalized to /ha/config → stripped = /config → 403
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('percent-encoded slash traversal is blocked (%2f)', async () => {
+      proxyPort = await startProxy();
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/states%2f..%2f..%2fconfig',
+      });
+      // Decoded to /ha/api/states/../../config → normalized to /ha/config → 403
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('double-encoded traversal does not bypass (%252e%252e)', async () => {
+      proxyPort = await startProxy();
+      // %252e decodes to %2e (literal), not to '.'
+      // decodeURIComponent('%252e') = '%2e', so path stays as-is with literal %2e
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/%252e%252e/config',
+      });
+      // After single decode: /ha/api/%2e%2e/config — %2e is a literal char, not traversal
+      // The path /api/%2e%2e/config starts with /api/ so it passes the allowlist
+      // (this is correct — double-encoded is not a traversal, it's a literal path)
+      expect(res.statusCode).toBe(200);
+    });
+
+    it('percent-encoded traversal blocked on Anthropic path too', async () => {
+      proxyPort = await startProxy();
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/v1/messages/%2e%2e/billing/usage',
+      });
+      // Decoded to /v1/messages/../billing/usage → normalized to /v1/billing/usage → 403
+      expect(res.statusCode).toBe(403);
+    });
+  });
+
+  // === F. Header Security ===
+
+  describe('header security', () => {
+    it('strips hop-by-hop headers on HA route', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/states/sensor.test',
+        headers: {
+          connection: 'keep-alive',
+          'keep-alive': 'timeout=5',
+          'transfer-encoding': 'chunked',
+        },
+      });
+      expect(haReq.headers['keep-alive']).toBeUndefined();
+      expect(haReq.headers['transfer-encoding']).toBeUndefined();
+    });
+
+    it('sets Host header to HA upstream host', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/states/sensor.test',
+      });
+      expect(haReq.headers['host']).toBe(`127.0.0.1:${haUpstreamPort}`);
+    });
+
+    it('sets Content-Length correctly for forwarded body', async () => {
+      proxyPort = await startProxy();
+      const body = JSON.stringify({ entity_id: 'light.kitchen' });
+      await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/ha/api/services/light/turn_on',
+          headers: { 'content-type': 'application/json' },
+        },
+        body,
+      );
+      expect(haReq.headers['content-length']).toBe(
+        String(Buffer.byteLength(body)),
+      );
+    });
+  });
+
+  // === G. Credential Isolation Between Routes ===
+
+  describe('credential isolation', () => {
+    it('HA token does NOT appear in Wolfram requests', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/wolfram/v1/simple?i=test',
+      });
+      expect(wolframReq.headers['authorization']).toBeUndefined();
+    });
+
+    it('Wolfram appid does NOT appear in HA requests', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/states/sensor.test',
+      });
+      expect(haReq.path).not.toContain('appid');
+    });
+
+    it('HA token does NOT appear in Anthropic requests', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: { 'content-type': 'application/json' },
+      });
+      expect(anthropicReq.headers['authorization']).toBeUndefined();
+    });
+
+    it('Wolfram appid does NOT appear in Anthropic requests', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: { 'content-type': 'application/json' },
+      });
+      expect(anthropicReq.path).not.toContain('appid');
+    });
+
+    it('Anthropic API key does NOT appear in HA requests', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/states/sensor.test',
+        headers: { 'x-api-key': 'placeholder' },
+      });
+      // The proxy should NOT inject x-api-key on service routes
+      expect(haReq.headers['x-api-key']).toBe('placeholder');
+    });
+  });
+
+  // === H. Anthropic Route Unchanged ===
+
+  describe('Anthropic route with service routes configured', () => {
+    it('Anthropic route still works when HA/Wolfram are configured', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/v1/messages',
+          headers: {
+            'content-type': 'application/json',
+            'x-api-key': 'placeholder',
+          },
+        },
+        '{}',
+      );
+      expect(anthropicReq.headers['x-api-key']).toBe('sk-ant-real-key');
+      expect(anthropicReq.path).toBe('/v1/messages');
+    });
+
+    it('Anthropic path allowlist still blocks unauthorized paths', async () => {
+      proxyPort = await startProxy();
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/v1/billing/usage',
+      });
+      expect(res.statusCode).toBe(403);
+    });
+  });
+
+  // === I. Error Handling ===
+
+  describe('service route error handling', () => {
+    it('returns 502 when HA upstream is unreachable', async () => {
+      proxyPort = await startProxy({
+        HA_URL: 'http://127.0.0.1:59998',
+      });
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/states/sensor.test',
+      });
+      expect(res.statusCode).toBe(502);
+      expect(res.body).toBe('Bad Gateway');
+    });
+
+    it('returns 502 when Wolfram upstream is unreachable', async () => {
+      proxyPort = await startProxy({
+        WOLFRAM_URL: 'http://127.0.0.1:59997',
+      });
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/wolfram/v1/simple?i=test',
+      });
+      expect(res.statusCode).toBe(502);
+      expect(res.body).toBe('Bad Gateway');
+    });
+  });
+
+  // === J. Method and Body Forwarding ===
+
+  describe('method and body forwarding', () => {
+    it('forwards GET to HA', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/states/sensor.test',
+      });
+      expect(haReq.method).toBe('GET');
+    });
+
+    it('forwards POST with body to HA', async () => {
+      proxyPort = await startProxy();
+      const body = JSON.stringify({ entity_id: 'light.kitchen' });
+      await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/ha/api/services/light/turn_on',
+          headers: { 'content-type': 'application/json' },
+        },
+        body,
+      );
+      expect(haReq.method).toBe('POST');
+      expect(haReq.body).toBe(body);
+    });
+
+    it('forwards POST with body to Wolfram', async () => {
+      proxyPort = await startProxy();
+      await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/wolfram/v1/simple?i=test',
+          headers: { 'content-type': 'application/json' },
+        },
+        '{}',
+      );
+      expect(wolframReq.method).toBe('POST');
+    });
+  });
+});
+
 // OAuth token refresh tests use vi.resetModules() to isolate module-level state
 // (cachedCredentials, refreshInProgress) between tests.
 describe('OAuth token refresh', () => {

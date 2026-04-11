@@ -81,7 +81,7 @@ systemctl --user restart nanoclaw
 
 ## Architecture Notes
 
-- **Credential proxy** (`src/credential-proxy.ts`): Real API keys never enter containers. The host runs an HTTP proxy that intercepts SDK requests and injects real auth headers. Containers only see `ANTHROPIC_BASE_URL=http://host:port` with a placeholder key.
+- **Credential proxy** (`src/credential-proxy.ts`): Real secrets never enter containers. The host runs an HTTP proxy with path-based routing that injects credentials for multiple services. Default path → Anthropic API (API key or OAuth token). `/ha/` → Home Assistant (bearer token). `/wolfram/` → Wolfram Alpha (appid query param). Containers only see proxy URLs (`ANTHROPIC_BASE_URL`, `HA_API_URL`, `WOLFRAM_API_URL`) — no real keys.
 - **IPC**: File-based (`data/ipc/`). Containers write JSON files; host polls and processes them. Used for send_message, task scheduling, group registration.
 - **Mount security** (`src/mount-security.ts`): External allowlist at `~/.config/nanoclaw/mount-allowlist.json` controls what host paths can be mounted. Blocked patterns prevent mounting `.ssh`, `.env`, credentials, etc.
 - **Group queue** (`src/group-queue.ts`): Serializes agent invocations per group with a global concurrency limit. Supports both fresh container spawns and piping into running containers.

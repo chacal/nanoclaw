@@ -33,4 +33,4 @@ Prints the absolute path to the saved PNG image on success. The image contains W
 
 - Returns non-zero exit code on failure
 - HTTP 501 means Wolfram Alpha couldn't parse the query — try rephrasing
-- If WOLFRAM_APP_ID is not configured, the tool will report that
+- If WOLFRAM_API_URL is not configured, the tool will report that

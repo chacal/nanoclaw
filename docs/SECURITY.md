@@ -66,14 +66,21 @@ Messages and task operations are verified against group identity:
 
 ### 5. Credential Isolation (Credential Proxy)
 
-Real API credentials **never enter containers**. Instead, the host runs an HTTP credential proxy that injects authentication headers transparently.
+Real API credentials **never enter containers**. Instead, the host runs an HTTP credential proxy with path-based routing that injects authentication for multiple services transparently.
 
 **How it works:**
 1. Host starts a credential proxy on `CREDENTIAL_PROXY_PORT` (default: 3001)
-2. Containers receive `ANTHROPIC_BASE_URL=http://host.docker.internal:<port>` and `ANTHROPIC_API_KEY=placeholder`
-3. The SDK sends API requests to the proxy with the placeholder key
-4. The proxy strips placeholder auth, injects real credentials (`x-api-key` or `Authorization: Bearer`), and forwards to `api.anthropic.com`
+2. Containers receive proxy URLs — no real keys:
+   - `ANTHROPIC_BASE_URL=http://host.docker.internal:<port>` with `ANTHROPIC_API_KEY=placeholder`
+   - `HA_API_URL=http://host.docker.internal:<port>/ha`
+   - `WOLFRAM_API_URL=http://host.docker.internal:<port>/wolfram`
+3. The proxy routes requests by path prefix and injects service-specific credentials:
+   - Default (no prefix) → Anthropic API: injects `x-api-key` header or OAuth `Authorization: Bearer`
+   - `/ha/` → Home Assistant: injects `Authorization: Bearer <HA_TOKEN>` header
+   - `/wolfram/` → Wolfram Alpha: injects `appid` query parameter
+4. Each service route has its own path allowlist (e.g., HA only allows `/api/`, Wolfram only `/v1/`)
 5. Agents cannot discover real credentials — not in environment, stdin, files, or `/proc`
+6. The HA MCP server config (`.mcp.json`) points at the proxy URL with no auth headers
 
 **NOT Mounted:**
 - Channel auth state (`store/auth/`) - host only

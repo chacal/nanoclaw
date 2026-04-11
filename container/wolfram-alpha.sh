@@ -18,8 +18,8 @@ if [ -z "$QUERY" ]; then
   exit 1
 fi
 
-if [ -z "${WOLFRAM_APP_ID:-}" ]; then
-  echo "Error: WOLFRAM_APP_ID environment variable not set" >&2
+if [ -z "${WOLFRAM_API_URL:-}" ]; then
+  echo "Error: WOLFRAM_API_URL environment variable not set" >&2
   exit 1
 fi
 
@@ -36,7 +36,7 @@ mkdir -p "$(dirname "$OUTPUT")"
 ENCODED_QUERY=$(node -e "console.log(encodeURIComponent(process.argv[1]))" "$QUERY")
 
 HTTP_CODE=$(curl -s -w "%{http_code}" -o "$OUTPUT" \
-  "https://api.wolframalpha.com/v1/simple?appid=${WOLFRAM_APP_ID}&i=${ENCODED_QUERY}&units=metric")
+  "${WOLFRAM_API_URL}/v1/simple?i=${ENCODED_QUERY}&units=metric")
 
 if [ "$HTTP_CODE" != "200" ]; then
   rm -f "$OUTPUT"

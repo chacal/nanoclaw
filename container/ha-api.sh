@@ -1,6 +1,6 @@
 #!/bin/bash
-# Query Home Assistant REST API directly.
-# Reads HA URL and auth token from the project's .mcp.json.
+# Query Home Assistant REST API via credential proxy.
+# Auth is handled by the host-side proxy; containers never see HA tokens.
 #
 # Usage:
 #   ha-api.sh GET /api/states/sensor.nordpool
@@ -21,32 +21,17 @@ if [ -z "$METHOD" ] || [ -z "$ENDPOINT" ]; then
   exit 1
 fi
 
-# Find .mcp.json in workspace
-MCP_FILE="/workspace/group/.mcp.json"
-if [ ! -f "$MCP_FILE" ]; then
-  echo "Error: $MCP_FILE not found" >&2
+# Use proxy URL from environment (credential proxy handles auth)
+if [ -z "${HA_API_URL:-}" ]; then
+  echo "Error: HA_API_URL environment variable not set" >&2
   exit 1
 fi
 
-# Extract HA URL and auth token from .mcp.json using Node (jq not available)
-read -r HA_MCP_URL AUTH_HEADER < <(node -e "
-  const c = require('$MCP_FILE');
-  const ha = c.mcpServers?.homeassistant;
-  console.log(ha?.url || '', ha?.headers?.Authorization || '');
-")
-
-if [ -z "$HA_MCP_URL" ] || [ -z "$AUTH_HEADER" ]; then
-  echo "Error: Home Assistant MCP config not found in $MCP_FILE" >&2
-  exit 1
-fi
-
-# Derive REST API base URL from MCP URL (strip /api/mcp suffix)
-HA_BASE="${HA_MCP_URL%/api/mcp}"
+HA_BASE="${HA_API_URL}"
 
 CURL_ARGS=(
   -sf
   -X "$METHOD"
-  -H "Authorization: $AUTH_HEADER"
   -H "Content-Type: application/json"
 )
 
