@@ -26,7 +26,8 @@ groups/
 .idea/
 .vscode/
 
-# Claude Code local settings
+# Local files (personal config, not for the public repo)
+*.local.md
 .claude/settings.local.json
 
 # Skills system (local per-installation state)
