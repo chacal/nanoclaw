@@ -5,7 +5,10 @@ import type { AddressInfo } from 'net';
 // --- Mocks ---
 
 vi.mock('./env.js', () => ({
-  readEnvFile: vi.fn(() => ({ VOICE_API_TOKEN: 'test-secret' })),
+  readEnvFile: vi.fn(() => ({
+    VOICE_API_TOKEN: 'test-secret',
+    WEBHOOK_TOKEN: 'webhook-secret',
+  })),
 }));
 vi.mock('./logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
@@ -29,7 +32,7 @@ vi.mock('os', () => ({
   default: { tmpdir: () => '/tmp' },
 }));
 
-import { startVoiceApi, VoiceApiDeps } from './voice-api.js';
+import { startHttpApi, HttpApiDeps } from './voice-api.js';
 
 // --- Helpers ---
 
@@ -63,7 +66,7 @@ function makeRequest(
   });
 }
 
-function createDeps(overrides?: Partial<VoiceApiDeps>): VoiceApiDeps {
+function createDeps(overrides?: Partial<HttpApiDeps>): HttpApiDeps {
   return {
     onMessage: vi.fn(),
     defaultJid: 'signal:+1234567890',
@@ -75,12 +78,12 @@ function createDeps(overrides?: Partial<VoiceApiDeps>): VoiceApiDeps {
 describe('voice-api', () => {
   let server: http.Server;
   let port: number;
-  let deps: VoiceApiDeps;
+  let deps: HttpApiDeps;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     deps = createDeps();
-    server = startVoiceApi(0, deps);
+    server = startHttpApi(0, deps);
     await new Promise<void>((resolve) => server.on('listening', resolve));
     port = (server.address() as AddressInfo).port;
   });
@@ -260,6 +263,146 @@ describe('voice-api', () => {
           sender_name: 'Alice',
           content: 'Custom target',
         }),
+      );
+    });
+  });
+
+  // --- POST /webhook ---
+
+  describe('POST /webhook', () => {
+    const webhookHeaders = {
+      authorization: 'Bearer webhook-secret',
+      'content-type': 'application/json',
+    };
+
+    it('returns 401 for missing token', async () => {
+      const res = await makeRequest(port, {
+        method: 'POST',
+        path: '/webhook',
+      });
+      expect(res.statusCode).toBe(401);
+    });
+
+    it('returns 401 for wrong token', async () => {
+      const res = await makeRequest(port, {
+        method: 'POST',
+        path: '/webhook',
+        headers: { authorization: 'Bearer wrong-token' },
+      });
+      expect(res.statusCode).toBe(401);
+    });
+
+    it('voice token does not work on /webhook', async () => {
+      const res = await makeRequest(
+        port,
+        {
+          method: 'POST',
+          path: '/webhook',
+          headers: { authorization: 'Bearer test-secret' },
+        },
+        JSON.stringify({ event: 'test' }),
+      );
+      expect(res.statusCode).toBe(401);
+    });
+
+    it('webhook token does not work on /message', async () => {
+      const res = await makeRequest(
+        port,
+        {
+          method: 'POST',
+          path: '/message',
+          headers: { authorization: 'Bearer webhook-secret' },
+        },
+        'Hello',
+      );
+      expect(res.statusCode).toBe(401);
+    });
+
+    it('accepts valid JSON and returns 202', async () => {
+      const res = await makeRequest(
+        port,
+        { method: 'POST', path: '/webhook', headers: webhookHeaders },
+        JSON.stringify({ event: 'morning_wakeup', entity: 'sensor.battery' }),
+      );
+      expect(res.statusCode).toBe(202);
+      expect(JSON.parse(res.body).ok).toBe(true);
+      expect(deps.onMessage).toHaveBeenCalledWith(
+        'signal:+1234567890',
+        expect.objectContaining({
+          content: expect.stringContaining('[Webhook Event]'),
+          is_trusted: true,
+          sender: 'webhook',
+        }),
+      );
+    });
+
+    it('formats event fields into readable text', async () => {
+      await makeRequest(
+        port,
+        { method: 'POST', path: '/webhook', headers: webhookHeaders },
+        JSON.stringify({
+          event: 'state_changed',
+          entity: 'sensor.battery',
+          from: 'Charging',
+          to: 'Not Charging',
+        }),
+      );
+
+      const injected = (deps.onMessage as ReturnType<typeof vi.fn>).mock
+        .calls[0][1];
+      expect(injected.content).toBe(
+        '[Webhook Event]\nevent: state_changed\nentity: sensor.battery\nfrom: Charging\nto: Not Charging',
+      );
+    });
+
+    it('returns 400 for empty body', async () => {
+      const res = await makeRequest(
+        port,
+        { method: 'POST', path: '/webhook', headers: webhookHeaders },
+        '',
+      );
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toBe('Empty body');
+    });
+
+    it('returns 400 for invalid JSON', async () => {
+      const res = await makeRequest(
+        port,
+        { method: 'POST', path: '/webhook', headers: webhookHeaders },
+        'not json {{{',
+      );
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toBe('Invalid JSON');
+    });
+
+    it('routes to custom jid from query param', async () => {
+      const res = await makeRequest(
+        port,
+        {
+          method: 'POST',
+          path: '/webhook?jid=tg:family-group',
+          headers: webhookHeaders,
+        },
+        JSON.stringify({ event: 'sauna_ready' }),
+      );
+      expect(res.statusCode).toBe(202);
+      expect(deps.onMessage).toHaveBeenCalledWith(
+        'tg:family-group',
+        expect.objectContaining({
+          chat_jid: 'tg:family-group',
+        }),
+      );
+    });
+
+    it('defaults to main group jid when no jid param', async () => {
+      await makeRequest(
+        port,
+        { method: 'POST', path: '/webhook', headers: webhookHeaders },
+        JSON.stringify({ event: 'test' }),
+      );
+      expect(deps.onMessage).toHaveBeenCalledWith(
+        'signal:+1234567890',
+        expect.objectContaining({ chat_jid: 'signal:+1234567890' }),
       );
     });
   });

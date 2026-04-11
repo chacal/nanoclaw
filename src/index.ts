@@ -67,7 +67,7 @@ import {
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
-import { startVoiceApi } from './voice-api.js';
+import { startHttpApi } from './voice-api.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -714,18 +714,18 @@ async function main(): Promise<void> {
     await initBotPool(TELEGRAM_BOT_POOL);
   }
 
-  // Start voice/text HTTP API for iOS Shortcuts
+  // Start HTTP API (voice, text, webhooks)
   // Find the main group's JID as the default target
   const mainEntry = Object.entries(registeredGroups).find(([, g]) => g.isMain);
   if (mainEntry) {
-    const voiceApiPort = parseInt(process.env.VOICE_API_PORT || '3002', 10);
-    const voiceServer = startVoiceApi(voiceApiPort, {
+    const httpApiPort = parseInt(process.env.VOICE_API_PORT || '3002', 10);
+    const httpServer = startHttpApi(httpApiPort, {
       onMessage: channelOpts.onMessage,
       defaultJid: mainEntry[0],
       defaultSender: ASSISTANT_NAME,
     });
-    process.on('SIGTERM', () => voiceServer.close());
-    process.on('SIGINT', () => voiceServer.close());
+    process.on('SIGTERM', () => httpServer.close());
+    process.on('SIGINT', () => httpServer.close());
   }
 
   // Start subsystems (independently of connection handler)
