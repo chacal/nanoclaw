@@ -27,7 +27,7 @@ function store(overrides: {
   sender_name: string;
   content: string;
   timestamp: string;
-  is_from_me?: boolean;
+  is_trusted?: boolean;
 }) {
   storeMessage({
     id: overrides.id,
@@ -36,7 +36,7 @@ function store(overrides: {
     sender_name: overrides.sender_name,
     content: overrides.content,
     timestamp: overrides.timestamp,
-    is_from_me: overrides.is_from_me ?? false,
+    is_trusted: overrides.is_trusted ?? false,
   });
 }
 
@@ -87,7 +87,7 @@ describe('storeMessage', () => {
     expect(messages).toHaveLength(0);
   });
 
-  it('stores is_from_me flag', () => {
+  it('stores is_trusted flag', () => {
     storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
 
     store({
@@ -97,10 +97,10 @@ describe('storeMessage', () => {
       sender_name: 'Me',
       content: 'my message',
       timestamp: '2024-01-01T00:00:05.000Z',
-      is_from_me: true,
+      is_trusted: true,
     });
 
-    // Message is stored (we can retrieve it — is_from_me doesn't affect retrieval)
+    // Message is stored (we can retrieve it — is_trusted doesn't affect retrieval)
     const messages = getMessagesSince(
       'group@g.us',
       '2024-01-01T00:00:00.000Z',

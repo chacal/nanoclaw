@@ -846,7 +846,10 @@ describe('resolveImagePath', () => {
     fs.writeFileSync(filePath, Buffer.from([0x89, 0x50]));
 
     try {
-      const result = resolveImagePath('whatsapp_main', 'images/test-resolve.png');
+      const result = resolveImagePath(
+        'whatsapp_main',
+        'images/test-resolve.png',
+      );
       expect(result).toBe(filePath);
     } finally {
       fs.unlinkSync(filePath);

@@ -51,7 +51,7 @@ export interface NewMessage {
   sender_name: string;
   content: string;
   timestamp: string;
-  is_from_me?: boolean;
+  is_trusted?: boolean;
   is_bot_message?: boolean;
 }
 

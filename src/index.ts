@@ -207,7 +207,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           isMainGroup ||
           !reqTrigger ||
           (hasTrigger &&
-            (msg.is_from_me ||
+            (msg.is_trusted ||
               isTriggerAllowed(chatJid, msg.sender, loadSenderAllowlist())))
         );
       },
@@ -222,7 +222,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const hasTrigger = missedMessages.some(
       (m) =>
         TRIGGER_PATTERN.test(m.content.trim()) &&
-        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+        (m.is_trusted || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
     );
     if (!hasTrigger) {
       return true;
@@ -471,7 +471,7 @@ async function startMessageLoop(): Promise<void> {
             if (
               isSessionCommandAllowed(
                 isMainGroup,
-                loopCmdMsg.is_from_me === true,
+                loopCmdMsg.is_trusted === true,
               )
             ) {
               queue.closeStdin(chatJid);
@@ -494,7 +494,7 @@ async function startMessageLoop(): Promise<void> {
             const hasTrigger = groupMessages.some(
               (m) =>
                 TRIGGER_PATTERN.test(m.content.trim()) &&
-                (m.is_from_me ||
+                (m.is_trusted ||
                   isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
             );
             if (!hasTrigger) continue;
@@ -659,7 +659,7 @@ async function main(): Promise<void> {
       }
 
       // Sender allowlist drop mode: discard messages from denied senders before storing
-      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
+      if (!msg.is_trusted && !msg.is_bot_message && registeredGroups[chatJid]) {
         const cfg = loadSenderAllowlist();
         if (
           shouldDropMessage(chatJid, cfg) &&

@@ -137,7 +137,7 @@ async function handleVoice(
       sender_name: sender,
       content: `[Voice: ${transcript}]`,
       timestamp,
-      is_from_me: true,
+      is_trusted: true,
     });
 
     logger.info(
@@ -179,7 +179,7 @@ async function handleMessage(
     sender_name: sender,
     content: text,
     timestamp,
-    is_from_me: true,
+    is_trusted: true,
   });
 
   logger.info(

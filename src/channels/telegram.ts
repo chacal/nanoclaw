@@ -136,10 +136,7 @@ export async function sendPoolImage(
     await api.sendPhoto(numericId, new InputFile(filePath), {
       caption: caption || undefined,
     });
-    logger.info(
-      { chatId, sender, poolIndex: idx },
-      'Pool image sent',
-    );
+    logger.info({ chatId, sender, poolIndex: idx }, 'Pool image sent');
     return true;
   } catch (err) {
     logger.error({ chatId, sender, err }, 'Failed to send pool image');
@@ -298,7 +295,7 @@ export class TelegramChannel implements Channel {
         sender_name: senderName,
         content,
         timestamp,
-        is_from_me: false,
+        is_trusted: false,
       });
 
       logger.info(
@@ -337,7 +334,7 @@ export class TelegramChannel implements Channel {
         sender_name: senderName,
         content: `${placeholder}${caption}`,
         timestamp,
-        is_from_me: false,
+        is_trusted: false,
       });
     };
 
@@ -403,7 +400,7 @@ export class TelegramChannel implements Channel {
         sender_name: senderName,
         content,
         timestamp,
-        is_from_me: false,
+        is_trusted: false,
       });
     });
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
@@ -460,7 +457,11 @@ export class TelegramChannel implements Channel {
     }
   }
 
-  async sendImage(jid: string, filePath: string, caption?: string): Promise<void> {
+  async sendImage(
+    jid: string,
+    filePath: string,
+    caption?: string,
+  ): Promise<void> {
     if (!this.bot) {
       logger.warn('Telegram bot not initialized');
       return;

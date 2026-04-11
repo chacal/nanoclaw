@@ -17,7 +17,7 @@ export function extractSessionCommand(
 
 /**
  * Check if a session command sender is authorized.
- * Allowed: main group (any sender), or trusted/admin sender (is_from_me) in any group.
+ * Allowed: main group (any sender), or trusted sender in any group.
  */
 export function isSessionCommandAllowed(
   isMainGroup: boolean,
@@ -85,7 +85,7 @@ export async function handleSessionCommand(opts: {
 
   if (!command || !cmdMsg) return { handled: false };
 
-  if (!isSessionCommandAllowed(isMainGroup, cmdMsg.is_from_me === true)) {
+  if (!isSessionCommandAllowed(isMainGroup, cmdMsg.is_trusted === true)) {
     // DENIED: send denial if the sender would normally be allowed to interact,
     // then silently consume the command by advancing the cursor past it.
     // Trade-off: other messages in the same batch are also consumed (cursor is

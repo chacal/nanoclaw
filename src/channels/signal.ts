@@ -318,7 +318,7 @@ export class SignalChannel implements Channel {
       sender_name: sourceName,
       content,
       timestamp,
-      is_from_me: isFromMe,
+      is_trusted: isFromMe,
     });
 
     logger.info(
@@ -471,7 +471,11 @@ export class SignalChannel implements Channel {
     }
   }
 
-  async sendImage(jid: string, filePath: string, caption?: string): Promise<void> {
+  async sendImage(
+    jid: string,
+    filePath: string,
+    caption?: string,
+  ): Promise<void> {
     if (!this.proc) {
       logger.warn('Signal not connected');
       return;

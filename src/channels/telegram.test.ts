@@ -275,7 +275,7 @@ describe('TelegramChannel', () => {
           sender: '99001',
           sender_name: 'Alice',
           content: 'Hello everyone',
-          is_from_me: false,
+          is_trusted: false,
         }),
       );
     });

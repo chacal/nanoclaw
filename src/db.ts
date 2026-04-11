@@ -30,7 +30,7 @@ function createSchema(database: Database.Database): void {
       sender_name TEXT,
       content TEXT,
       timestamp TEXT,
-      is_from_me INTEGER,
+      is_trusted INTEGER,
       is_bot_message INTEGER DEFAULT 0,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
@@ -117,6 +117,15 @@ function createSchema(database: Database.Database): void {
     );
   } catch {
     /* column already exists */
+  }
+
+  // Rename is_from_me → is_trusted (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE messages RENAME COLUMN is_from_me TO is_trusted`,
+    );
+  } catch {
+    /* column already renamed or was created as is_trusted */
   }
 
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
@@ -267,7 +276,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_trusted, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -275,7 +284,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.sender_name,
     msg.content,
     msg.timestamp,
-    msg.is_from_me ? 1 : 0,
+    msg.is_trusted ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
   );
 }
@@ -294,7 +303,7 @@ export function getNewMessages(
   // Subquery takes the N most recent, outer query re-sorts chronologically.
   const sql = `
     SELECT * FROM (
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_trusted
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -327,7 +336,7 @@ export function getMessagesSince(
   // Subquery takes the N most recent, outer query re-sorts chronologically.
   const sql = `
     SELECT * FROM (
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_trusted
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
         AND is_bot_message = 0 AND content NOT LIKE ?

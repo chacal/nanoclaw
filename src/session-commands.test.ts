@@ -46,7 +46,7 @@ describe('isSessionCommandAllowed', () => {
     expect(isSessionCommandAllowed(true, false)).toBe(true);
   });
 
-  it('allows trusted/admin sender (is_from_me) in non-main group', () => {
+  it('allows trusted/admin sender (is_trusted) in non-main group', () => {
     expect(isSessionCommandAllowed(false, true)).toBe(true);
   });
 
@@ -126,7 +126,7 @@ describe('handleSessionCommand', () => {
   it('sends denial to interactable sender in non-main group', async () => {
     const deps = makeDeps();
     const result = await handleSessionCommand({
-      missedMessages: [makeMsg('/compact', { is_from_me: false })],
+      missedMessages: [makeMsg('/compact', { is_trusted: false })],
       isMainGroup: false,
       groupName: 'test',
       triggerPattern: trigger,
@@ -146,7 +146,7 @@ describe('handleSessionCommand', () => {
       canSenderInteract: vi.fn().mockReturnValue(false),
     });
     const result = await handleSessionCommand({
-      missedMessages: [makeMsg('/compact', { is_from_me: false })],
+      missedMessages: [makeMsg('/compact', { is_trusted: false })],
       isMainGroup: false,
       groupName: 'test',
       triggerPattern: trigger,
@@ -186,10 +186,10 @@ describe('handleSessionCommand', () => {
     );
   });
 
-  it('allows is_from_me sender in non-main group', async () => {
+  it('allows is_trusted sender in non-main group', async () => {
     const deps = makeDeps();
     const result = await handleSessionCommand({
-      missedMessages: [makeMsg('/compact', { is_from_me: true })],
+      missedMessages: [makeMsg('/compact', { is_trusted: true })],
       isMainGroup: false,
       groupName: 'test',
       triggerPattern: trigger,
