@@ -926,6 +926,51 @@ describe('service routes', () => {
       // Normalized to /v1/messages — no longer starts with /wolfram/
       expect(wolframReq.path).toBe('');
     });
+
+    it('percent-encoded path traversal is blocked (%2e%2e)', async () => {
+      proxyPort = await startProxy();
+      // %2e%2e = '..' — must be decoded before allowlist check
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/%2e%2e/config',
+      });
+      // Decoded to /ha/api/../config → normalized to /ha/config → stripped = /config → 403
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('percent-encoded slash traversal is blocked (%2f)', async () => {
+      proxyPort = await startProxy();
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/states%2f..%2f..%2fconfig',
+      });
+      // Decoded to /ha/api/states/../../config → normalized to /ha/config → 403
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('double-encoded traversal does not bypass (%252e%252e)', async () => {
+      proxyPort = await startProxy();
+      // %252e decodes to %2e (literal), not to '.'
+      // decodeURIComponent('%252e') = '%2e', so path stays as-is with literal %2e
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/ha/api/%252e%252e/config',
+      });
+      // After single decode: /ha/api/%2e%2e/config — %2e is a literal char, not traversal
+      // The path /api/%2e%2e/config starts with /api/ so it passes the allowlist
+      // (this is correct — double-encoded is not a traversal, it's a literal path)
+      expect(res.statusCode).toBe(200);
+    });
+
+    it('percent-encoded traversal blocked on Anthropic path too', async () => {
+      proxyPort = await startProxy();
+      const res = await makeRequest(proxyPort, {
+        method: 'GET',
+        path: '/v1/messages/%2e%2e/billing/usage',
+      });
+      // Decoded to /v1/messages/../billing/usage → normalized to /v1/billing/usage → 403
+      expect(res.statusCode).toBe(403);
+    });
   });
 
   // === F. Header Security ===
