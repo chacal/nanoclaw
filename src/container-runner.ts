@@ -18,7 +18,6 @@ import {
   IDLE_TIMEOUT,
   TIMEZONE,
 } from './config.js';
-import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -187,6 +186,13 @@ function buildVolumeMounts(
       logger.warn({ err }, 'Failed to parse .mcp.overrides.json');
     }
   }
+  // Route HA MCP through credential proxy — no secrets in config files.
+  // Overrides any homeassistant entry from shared-mcp.json or overrides.
+  mergedServers['homeassistant'] = {
+    type: 'http',
+    url: `http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}/ha/api/mcp`,
+  };
+
   if (Object.keys(mergedServers).length > 0) {
     fs.writeFileSync(
       mcpDst,
@@ -288,18 +294,15 @@ function buildContainerArgs(
     'GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file',
   );
 
-  // Wolfram Alpha API key for computational queries
-  const wolframAppId =
-    readEnvFile(['WOLFRAM_APP_ID']).WOLFRAM_APP_ID ||
-    process.env.WOLFRAM_APP_ID;
-  if (wolframAppId) {
-    args.push('-e', `WOLFRAM_APP_ID=${wolframAppId}`);
-  }
-
-  // Route API traffic through the credential proxy (containers never see real secrets)
+  // Route all API traffic through the credential proxy (containers never see real secrets)
+  const proxyBase = `http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`;
   args.push(
     '-e',
-    `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
+    `ANTHROPIC_BASE_URL=${proxyBase}`,
+    '-e',
+    `HA_API_URL=${proxyBase}/ha`,
+    '-e',
+    `WOLFRAM_API_URL=${proxyBase}/wolfram`,
   );
 
   // Mirror the host's auth method with a placeholder value.
