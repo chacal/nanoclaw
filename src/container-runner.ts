@@ -18,6 +18,7 @@ import {
   IDLE_TIMEOUT,
   TIMEZONE,
 } from './config.js';
+import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -187,11 +188,13 @@ function buildVolumeMounts(
     }
   }
   // Route HA MCP through credential proxy — no secrets in config files.
-  // Overrides any homeassistant entry from shared-mcp.json or overrides.
-  mergedServers['homeassistant'] = {
-    type: 'http',
-    url: `http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}/ha/api/mcp`,
-  };
+  // Only inject when HA is configured (HA_URL is not a secret, just a hostname).
+  if (readEnvFile(['HA_URL']).HA_URL) {
+    mergedServers['homeassistant'] = {
+      type: 'http',
+      url: `http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}/ha/api/mcp`,
+    };
+  }
 
   if (Object.keys(mergedServers).length > 0) {
     fs.writeFileSync(
