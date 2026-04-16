@@ -129,7 +129,7 @@ function saveCredentialsFile(filePath: string, creds: OAuthCredentials): void {
   }
 }
 
-async function refreshOAuthToken(
+function refreshOAuthTokenOnce(
   refreshToken: string,
 ): Promise<OAuthCredentials> {
   return new Promise((resolve, reject) => {
@@ -183,6 +183,39 @@ async function refreshOAuthToken(
     req.write(body);
     req.end();
   });
+}
+
+const REFRESH_MAX_RETRIES = 3;
+const REFRESH_BASE_DELAY_MS = 2_000;
+
+function isRetryable(err: Error): boolean {
+  // Retry on 5xx server errors, network errors, and timeouts
+  const msg = err.message;
+  return /\(5\d{2}\)/.test(msg) || /timed out|ECONNR|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(msg);
+}
+
+async function refreshOAuthToken(
+  refreshToken: string,
+): Promise<OAuthCredentials> {
+  let lastErr: Error | undefined;
+  for (let attempt = 0; attempt <= REFRESH_MAX_RETRIES; attempt++) {
+    try {
+      return await refreshOAuthTokenOnce(refreshToken);
+    } catch (err) {
+      lastErr = err instanceof Error ? err : new Error(String(err));
+      if (attempt < REFRESH_MAX_RETRIES && isRetryable(lastErr)) {
+        const delay = REFRESH_BASE_DELAY_MS * 2 ** attempt;
+        logger.warn(
+          { attempt: attempt + 1, delay, err: lastErr.message },
+          'OAuth token refresh failed, retrying...',
+        );
+        await new Promise((r) => setTimeout(r, delay));
+      } else {
+        break;
+      }
+    }
+  }
+  throw lastErr!;
 }
 
 /**
