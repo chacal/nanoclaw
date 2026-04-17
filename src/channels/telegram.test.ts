@@ -39,6 +39,11 @@ vi.mock('../image-ingest.js', () => ({
   ),
 }));
 
+// Mock transcription (used by the voice/audio handler)
+vi.mock('../transcription.js', () => ({
+  transcribeAudio: vi.fn(async () => 'mock transcript'),
+}));
+
 // --- Grammy mock ---
 
 type Handler = (...args: any[]) => any;
@@ -829,7 +834,7 @@ describe('TelegramChannel', () => {
       );
     });
 
-    it('downloads voice message', async () => {
+    it('transcribes inbound voice messages and emits [Voice: ...] marker', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -839,7 +844,7 @@ describe('TelegramChannel', () => {
       });
 
       const ctx = createMediaCtx({
-        extra: { voice: { file_id: 'voice_id' } },
+        extra: { voice: { file_id: 'voice_id', mime_type: 'audio/ogg' } },
       });
       await triggerMediaMessage('message:voice', ctx);
       await flushPromises();
@@ -848,12 +853,12 @@ describe('TelegramChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
         expect.objectContaining({
-          content: '[Voice message] (/workspace/group/attachments/voice_1.oga)',
+          content: '[Voice: mock transcript]',
         }),
       );
     });
 
-    it('downloads audio with original filename', async () => {
+    it('transcribes inbound audio files and emits [Voice: ...] marker', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -863,7 +868,13 @@ describe('TelegramChannel', () => {
       });
 
       const ctx = createMediaCtx({
-        extra: { audio: { file_id: 'audio_id', file_name: 'song.mp3' } },
+        extra: {
+          audio: {
+            file_id: 'audio_id',
+            file_name: 'song.mp3',
+            mime_type: 'audio/mpeg',
+          },
+        },
       });
       await triggerMediaMessage('message:audio', ctx);
       await flushPromises();
@@ -871,7 +882,7 @@ describe('TelegramChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
         expect.objectContaining({
-          content: '[Audio] (/workspace/group/attachments/song.mp3)',
+          content: '[Voice: mock transcript]',
         }),
       );
     });
