@@ -53,11 +53,81 @@ interface SessionsIndex {
   entries: SessionEntry[];
 }
 
+type ContentBlock =
+  | { type: 'text'; text: string }
+  | {
+      type: 'image';
+      source: { type: 'base64'; media_type: string; data: string };
+    };
+
 interface SDKUserMessage {
   type: 'user';
-  message: { role: 'user'; content: string };
+  message: { role: 'user'; content: string | ContentBlock[] };
   parent_tool_use_id: null;
   session_id: string;
+}
+
+const IMAGE_MARKER_RE = /\[Image:\s*(images\/[^\]]+)\]/g;
+
+const EXT_TO_MEDIA_TYPE: Record<string, string> = {
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+};
+
+/**
+ * Parse [Image: images/...] markers and return multimodal content blocks.
+ * Returns plain string when no markers are present.
+ */
+function buildContent(text: string): string | ContentBlock[] {
+  const matches = [...text.matchAll(IMAGE_MARKER_RE)];
+  if (matches.length === 0) return text;
+
+  const blocks: ContentBlock[] = [];
+  let lastIndex = 0;
+
+  for (const match of matches) {
+    const before = text.slice(lastIndex, match.index);
+    if (before.trim()) blocks.push({ type: 'text', text: before });
+
+    const relativePath = match[1];
+    const fullPath = path.resolve('/workspace/group', relativePath);
+
+    if (!fullPath.startsWith('/workspace/group/')) {
+      blocks.push({ type: 'text', text: '[Image unavailable]' });
+      lastIndex = match.index! + match[0].length;
+      continue;
+    }
+
+    try {
+      const data = fs.readFileSync(fullPath);
+      const ext = path.extname(fullPath).toLowerCase();
+      const mediaType = EXT_TO_MEDIA_TYPE[ext] || 'image/jpeg';
+      blocks.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: mediaType,
+          data: data.toString('base64'),
+        },
+      });
+      log(`Loaded image: ${relativePath} (${data.length} bytes, ${mediaType})`);
+    } catch (err) {
+      log(
+        `Failed to load image ${relativePath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      blocks.push({ type: 'text', text: '[Image unavailable]' });
+    }
+
+    lastIndex = match.index! + match[0].length;
+  }
+
+  const after = text.slice(lastIndex);
+  if (after.trim()) blocks.push({ type: 'text', text: after });
+
+  return blocks;
 }
 
 const IPC_INPUT_DIR = '/workspace/ipc/input';
@@ -76,7 +146,7 @@ class MessageStream {
   push(text: string): void {
     this.queue.push({
       type: 'user',
-      message: { role: 'user', content: text },
+      message: { role: 'user', content: buildContent(text) },
       parent_tool_use_id: null,
       session_id: '',
     });

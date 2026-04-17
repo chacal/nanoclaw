@@ -31,6 +31,14 @@ vi.mock('../group-folder.js', () => ({
   ),
 }));
 
+// Mock image-ingest (used by the photo handler)
+vi.mock('../image-ingest.js', () => ({
+  ingestImage: vi.fn(
+    (_data: Buffer, channel: string, id: string, ext: string) =>
+      `[Image: images/${channel}-${id}${ext}]`,
+  ),
+}));
+
 // --- Grammy mock ---
 
 type Handler = (...args: any[]) => any;
@@ -38,6 +46,9 @@ type Handler = (...args: any[]) => any;
 const botRef = vi.hoisted(() => ({ current: null as any }));
 
 vi.mock('grammy', () => ({
+  InputFile: class InputFile {
+    constructor(public source: string) {}
+  },
   Bot: class MockBot {
     token: string;
     commandHandlers = new Map<string, Handler>();
@@ -676,7 +687,36 @@ describe('TelegramChannel', () => {
   // --- Non-text messages ---
 
   describe('non-text messages', () => {
-    it('downloads photo and includes path in content', async () => {
+    it('downloads photo and emits our [Image: images/...] marker', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      // Realistic Telegram upload: 4 sizes ascending. We should pick the
+      // second-to-largest for bandwidth/quality balance.
+      const ctx = createMediaCtx({
+        extra: {
+          photo: [
+            { file_id: 'thumb_id', width: 90 },
+            { file_id: 'small_id', width: 320 },
+            { file_id: 'medium_id', width: 800 },
+            { file_id: 'large_id', width: 1280 },
+          ],
+        },
+      });
+      await triggerMediaMessage('message:photo', ctx);
+      await flushPromises();
+
+      expect(currentBot().api.getFile).toHaveBeenCalledWith('medium_id');
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content: expect.stringMatching(/^\[Image: images\/tg-\d+\.jpg\]$/),
+        }),
+      );
+    });
+
+    it('falls back to the only size when fewer than three are sent', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -684,21 +724,17 @@ describe('TelegramChannel', () => {
       const ctx = createMediaCtx({
         extra: {
           photo: [
-            { file_id: 'small_id', width: 90 },
-            { file_id: 'large_id', width: 800 },
+            { file_id: 'only_small', width: 90 },
+            { file_id: 'only_large', width: 800 },
           ],
         },
       });
       await triggerMediaMessage('message:photo', ctx);
       await flushPromises();
 
-      expect(currentBot().api.getFile).toHaveBeenCalledWith('large_id');
-      expect(opts.onMessage).toHaveBeenCalledWith(
-        'tg:100200300',
-        expect.objectContaining({
-          content: '[Photo] (/workspace/group/attachments/photo_1.jpg)',
-        }),
-      );
+      // With only 2 sizes, the second-to-largest rule would pick the tiny
+      // thumb; fall back to the largest instead.
+      expect(currentBot().api.getFile).toHaveBeenCalledWith('only_large');
     });
 
     it('downloads photo with caption', async () => {
@@ -716,13 +752,14 @@ describe('TelegramChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
         expect.objectContaining({
-          content:
-            '[Photo] (/workspace/group/attachments/photo_1.jpg) Look at this',
+          content: expect.stringMatching(
+            /^\[Image: images\/tg-\d+\.jpg\] Look at this$/,
+          ),
         }),
       );
     });
 
-    it('falls back to placeholder when download fails', async () => {
+    it('falls back to [Photo] placeholder when download fails', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -921,6 +958,26 @@ describe('TelegramChannel', () => {
   });
 
   // --- sendMessage ---
+
+  describe('sendImage', () => {
+    it('calls grammy sendPhoto with an InputFile', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      // Extend the mock with sendPhoto for this test.
+      const sendPhoto = vi.fn().mockResolvedValue(undefined);
+      currentBot().api.sendPhoto = sendPhoto;
+
+      await channel.sendImage!('tg:-1001234567890', '/host/pic.jpg', 'caption');
+
+      expect(sendPhoto).toHaveBeenCalledTimes(1);
+      const [chatId, inputFile, options] = sendPhoto.mock.calls[0];
+      expect(chatId).toBe(-1001234567890);
+      expect(inputFile.source).toBe('/host/pic.jpg');
+      expect(options.caption).toBe('caption');
+    });
+  });
 
   describe('sendMessage', () => {
     it('sends message via bot API', async () => {
