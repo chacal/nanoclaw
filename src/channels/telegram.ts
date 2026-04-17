@@ -237,68 +237,20 @@ export class TelegramChannel implements Channel {
       );
     });
 
-    // Handle non-text messages: download files when possible, fall back to placeholders.
-    const storeMedia = (
+    // Shared inbound-media delivery: computes chatJid + per-message metadata,
+    // emits onChatMetadata, invokes a caller-supplied buildContent that
+    // decides the message body, and finally fires onMessage. All specific
+    // handlers (photo / voice / audio / video / document / sticker / …) are
+    // just different buildContent implementations.
+    interface MediaContext {
+      group: RegisteredGroup;
+      caption: string;
+      msgId: string;
+    }
+    const deliverMedia = async (
       ctx: any,
-      placeholder: string,
-      opts?: { fileId?: string; filename?: string },
-    ) => {
-      const chatJid = `tg:${ctx.chat.id}`;
-      const group = this.opts.registeredGroups()[chatJid];
-      if (!group) return;
-
-      const timestamp = new Date(ctx.message.date * 1000).toISOString();
-      const senderName =
-        ctx.from?.first_name ||
-        ctx.from?.username ||
-        ctx.from?.id?.toString() ||
-        'Unknown';
-      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
-
-      const isGroup =
-        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-      this.opts.onChatMetadata(
-        chatJid,
-        timestamp,
-        undefined,
-        'telegram',
-        isGroup,
-      );
-
-      const deliver = (content: string) => {
-        this.opts.onMessage(chatJid, {
-          id: ctx.message.message_id.toString(),
-          chat_jid: chatJid,
-          sender: ctx.from?.id?.toString() || '',
-          sender_name: senderName,
-          content,
-          timestamp,
-          is_from_me: false,
-        });
-      };
-
-      // If we have a file_id, attempt to download; deliver asynchronously
-      if (opts?.fileId) {
-        const msgId = ctx.message.message_id.toString();
-        const filename =
-          opts.filename ||
-          `${placeholder.replace(/[\[\] ]/g, '').toLowerCase()}_${msgId}`;
-        this.downloadFile(opts.fileId, group.folder, filename).then(
-          (filePath) => {
-            if (filePath) {
-              deliver(`${placeholder} (${filePath})${caption}`);
-            } else {
-              deliver(`${placeholder}${caption}`);
-            }
-          },
-        );
-        return;
-      }
-
-      deliver(`${placeholder}${caption}`);
-    };
-
-    this.bot.on('message:photo', async (ctx) => {
+      buildContent: (mc: MediaContext) => string | Promise<string>,
+    ): Promise<void> => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
@@ -322,32 +274,7 @@ export class TelegramChannel implements Channel {
         isGroup,
       );
 
-      let content = `[Photo]${caption}`;
-      try {
-        if (!this.bot) throw new Error('Bot not connected');
-        // Telegram sends sizes smallest→largest (typically 90/320/800/1280 px).
-        // Take second-to-largest when available — plenty of detail for vision
-        // at a fraction of the base64 payload cost.
-        const photos = ctx.message.photo;
-        const photo =
-          photos.length >= 3
-            ? photos[photos.length - 2]
-            : photos[photos.length - 1];
-        const file = await this.bot.api.getFile(photo.file_id);
-        if (file.file_path) {
-          const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
-          const resp = await fetch(url);
-          if (resp.ok) {
-            const data = Buffer.from(await resp.arrayBuffer());
-            const ext = path.extname(file.file_path) || '.jpg';
-            const marker = ingestImage(data, 'tg', msgId, ext, group.folder);
-            if (marker) content = `${marker}${caption}`;
-          }
-        }
-      } catch (err) {
-        logger.warn({ err, chatJid }, 'Failed to download Telegram photo');
-      }
-
+      const content = await buildContent({ group, caption, msgId });
       this.opts.onMessage(chatJid, {
         id: msgId,
         chat_jid: chatJid,
@@ -357,62 +284,79 @@ export class TelegramChannel implements Channel {
         timestamp,
         is_from_me: false,
       });
-    });
-    this.bot.on('message:video', (ctx) => {
-      storeMedia(ctx, '[Video]', {
-        fileId: ctx.message.video?.file_id,
-        filename: `video_${ctx.message.message_id}`,
-      });
-    });
-    const transcribeAndDeliver = async (
-      ctx: any,
-      opts: { fileId?: string; filename: string; mimeType?: string },
-    ) => {
-      const chatJid = `tg:${ctx.chat.id}`;
-      const group = this.opts.registeredGroups()[chatJid];
-      if (!group) return;
+    };
 
-      const timestamp = new Date(ctx.message.date * 1000).toISOString();
-      const senderName =
-        ctx.from?.first_name ||
-        ctx.from?.username ||
-        ctx.from?.id?.toString() ||
-        'Unknown';
-      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
-      const isGroup =
-        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-
-      this.opts.onChatMetadata(
-        chatJid,
-        timestamp,
-        undefined,
-        'telegram',
-        isGroup,
+    // Generic placeholder delivery for non-text messages with optional file
+    // download. Produces "[Type] (container/path)caption" or just the
+    // placeholder when no fileId or the download fails.
+    const placeholderContent = async (
+      placeholder: string,
+      { group, caption, msgId }: MediaContext,
+      opts?: { fileId?: string; filename?: string },
+    ): Promise<string> => {
+      if (!opts?.fileId) return `${placeholder}${caption}`;
+      const filename =
+        opts.filename ||
+        `${placeholder.replace(/[\[\] ]/g, '').toLowerCase()}_${msgId}`;
+      const filePath = await this.downloadFile(
+        opts.fileId,
+        group.folder,
+        filename,
       );
+      return filePath
+        ? `${placeholder} (${filePath})${caption}`
+        : `${placeholder}${caption}`;
+    };
 
-      const deliver = (content: string) =>
-        this.opts.onMessage(chatJid, {
-          id: ctx.message.message_id.toString(),
-          chat_jid: chatJid,
-          sender: ctx.from?.id?.toString() || '',
-          sender_name: senderName,
-          content,
-          timestamp,
-          is_from_me: false,
-        });
+    this.bot.on('message:photo', (ctx) =>
+      deliverMedia(ctx, async ({ group, caption, msgId }) => {
+        try {
+          if (!this.bot) throw new Error('Bot not connected');
+          // Telegram sends sizes smallest→largest (typically 90/320/800/1280 px).
+          // Take second-to-largest when available — plenty of detail for vision
+          // at a fraction of the base64 payload cost.
+          const photos = ctx.message.photo;
+          const photo =
+            photos.length >= 3
+              ? photos[photos.length - 2]
+              : photos[photos.length - 1];
+          const file = await this.bot.api.getFile(photo.file_id);
+          if (file.file_path) {
+            const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+            const resp = await fetch(url);
+            if (resp.ok) {
+              const data = Buffer.from(await resp.arrayBuffer());
+              const ext = path.extname(file.file_path) || '.jpg';
+              const marker = ingestImage(data, 'tg', msgId, ext, group.folder);
+              if (marker) return `${marker}${caption}`;
+            }
+          }
+        } catch (err) {
+          logger.warn({ err }, 'Failed to download Telegram photo');
+        }
+        return `[Photo]${caption}`;
+      }),
+    );
 
-      if (!opts.fileId) {
-        deliver(`[Voice message - no file]${caption}`);
-        return;
-      }
+    this.bot.on('message:video', (ctx) =>
+      deliverMedia(ctx, (mc) =>
+        placeholderContent('[Video]', mc, {
+          fileId: ctx.message.video?.file_id,
+          filename: `video_${ctx.message.message_id}`,
+        }),
+      ),
+    );
 
+    const transcriptContent = async (
+      opts: { fileId?: string; filename: string; mimeType?: string },
+      { group, caption }: MediaContext,
+    ): Promise<string> => {
+      if (!opts.fileId) return `[Voice message - no file]${caption}`;
       try {
         if (!this.bot) throw new Error('Bot not connected');
         const file = await this.bot.api.getFile(opts.fileId);
-        if (!file.file_path) {
-          deliver(`[Voice message - no file path]${caption}`);
-          return;
-        }
+        if (!file.file_path) return `[Voice message - no file path]${caption}`;
+
         const groupDir = resolveGroupFolderPath(group.folder);
         const attachDir = path.join(groupDir, 'attachments');
         fs.mkdirSync(attachDir, { recursive: true });
@@ -425,52 +369,66 @@ export class TelegramChannel implements Channel {
 
         const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
         const resp = await fetch(url);
-        if (!resp.ok) {
-          deliver(`[Voice message - download failed]${caption}`);
-          return;
-        }
+        if (!resp.ok) return `[Voice message - download failed]${caption}`;
         fs.writeFileSync(hostPath, Buffer.from(await resp.arrayBuffer()));
 
         const transcript = await transcribeAudio(hostPath, opts.mimeType);
         const marker = transcript
           ? `[Voice: ${transcript}]`
           : '[Voice message - transcription unavailable]';
-        deliver(`${marker}${caption}`);
+        return `${marker}${caption}`;
       } catch (err) {
-        logger.warn({ err, chatJid }, 'Failed to transcribe Telegram audio');
-        deliver(`[Voice message - error]${caption}`);
+        logger.warn({ err }, 'Failed to transcribe Telegram audio');
+        return `[Voice message - error]${caption}`;
       }
     };
 
-    this.bot.on('message:voice', (ctx) => {
-      transcribeAndDeliver(ctx, {
-        fileId: ctx.message.voice?.file_id,
-        filename: `voice_${ctx.message.message_id}`,
-        mimeType: ctx.message.voice?.mime_type,
-      });
-    });
-    this.bot.on('message:audio', (ctx) => {
-      const name =
-        ctx.message.audio?.file_name || `audio_${ctx.message.message_id}`;
-      transcribeAndDeliver(ctx, {
-        fileId: ctx.message.audio?.file_id,
-        filename: name,
-        mimeType: ctx.message.audio?.mime_type,
-      });
-    });
+    this.bot.on('message:voice', (ctx) =>
+      deliverMedia(ctx, (mc) =>
+        transcriptContent(
+          {
+            fileId: ctx.message.voice?.file_id,
+            filename: `voice_${ctx.message.message_id}`,
+            mimeType: ctx.message.voice?.mime_type,
+          },
+          mc,
+        ),
+      ),
+    );
+    this.bot.on('message:audio', (ctx) =>
+      deliverMedia(ctx, (mc) =>
+        transcriptContent(
+          {
+            fileId: ctx.message.audio?.file_id,
+            filename:
+              ctx.message.audio?.file_name || `audio_${ctx.message.message_id}`,
+            mimeType: ctx.message.audio?.mime_type,
+          },
+          mc,
+        ),
+      ),
+    );
     this.bot.on('message:document', (ctx) => {
       const name = ctx.message.document?.file_name || 'file';
-      storeMedia(ctx, `[Document: ${name}]`, {
-        fileId: ctx.message.document?.file_id,
-        filename: name,
-      });
+      return deliverMedia(ctx, (mc) =>
+        placeholderContent(`[Document: ${name}]`, mc, {
+          fileId: ctx.message.document?.file_id,
+          filename: name,
+        }),
+      );
     });
     this.bot.on('message:sticker', (ctx) => {
       const emoji = ctx.message.sticker?.emoji || '';
-      storeMedia(ctx, `[Sticker ${emoji}]`);
+      return deliverMedia(ctx, (mc) =>
+        placeholderContent(`[Sticker ${emoji}]`, mc),
+      );
     });
-    this.bot.on('message:location', (ctx) => storeMedia(ctx, '[Location]'));
-    this.bot.on('message:contact', (ctx) => storeMedia(ctx, '[Contact]'));
+    this.bot.on('message:location', (ctx) =>
+      deliverMedia(ctx, (mc) => placeholderContent('[Location]', mc)),
+    );
+    this.bot.on('message:contact', (ctx) =>
+      deliverMedia(ctx, (mc) => placeholderContent('[Contact]', mc)),
+    );
 
     // Handle errors gracefully
     this.bot.catch((err) => {
