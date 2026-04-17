@@ -1,8 +1,23 @@
 import { EventEmitter } from 'events';
+import fs from 'fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('./registry.js', () => ({ registerChannel: vi.fn() }));
 vi.mock('../env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));
+
+const ingestImageMock = vi.fn(
+  (
+    _data: Buffer,
+    channel: string,
+    id: string,
+    ext: string,
+    _groupFolder: string,
+  ) => `[Image: images/${channel}-${id}${ext}]`,
+);
+vi.mock('../image-ingest.js', () => ({
+  ingestImage: (...args: any[]) =>
+    ingestImageMock(...(args as [any, string, string, string, string])),
+}));
 
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
@@ -423,6 +438,119 @@ describe('sendMessage', () => {
     await expect(
       channel.sendMessage('signal:+1', 'x'),
     ).resolves.toBeUndefined();
+  });
+});
+
+// --- images ---------------------------------------------------------------
+
+describe('image attachments', () => {
+  afterEach(() => {
+    spawnMock.mockReset();
+    ingestImageMock.mockClear();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('ingests an inbound image and appends the marker to content', async () => {
+    const { channel, onMessage, groups } = makeChannel();
+    groups['signal:+19998887777'] = { name: 'Jouni', folder: 'solo' };
+
+    // Stub fs.readFileSync so we don't hit signal-cli's real attachments dir.
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(Buffer.from('imgbytes'));
+
+    const proc = await connectWithFakeProc(channel);
+
+    emitStdout(
+      proc,
+      JSON.stringify({
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+19998887777',
+            sourceName: 'Jouni',
+            timestamp: 1700000000004,
+            dataMessage: {
+              message: 'look at this',
+              attachments: [{ id: 'att-1', contentType: 'image/png' }],
+            },
+          },
+        },
+      }) + '\n',
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(ingestImageMock).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      'sig',
+      'att-1',
+      '.png',
+      'solo',
+    );
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage.mock.calls[0][1].content).toBe(
+      'look at this\n[Image: images/sig-att-1.png]',
+    );
+  });
+
+  it('drops image attachments with traversal IDs', async () => {
+    const { channel, onMessage, groups } = makeChannel();
+    groups['signal:+19998887777'] = { name: 'Jouni', folder: 'solo' };
+
+    const proc = await connectWithFakeProc(channel);
+
+    emitStdout(
+      proc,
+      JSON.stringify({
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+19998887777',
+            sourceName: 'Jouni',
+            timestamp: 1700000000005,
+            dataMessage: {
+              message: 'ok',
+              attachments: [
+                { id: '../../etc/passwd', contentType: 'image/png' },
+              ],
+            },
+          },
+        },
+      }) + '\n',
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(ingestImageMock).not.toHaveBeenCalled();
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    // Traversal is dropped by the path guard, but we still surface an
+    // unavailable marker so the agent isn't lied to about the attachment.
+    expect(onMessage.mock.calls[0][1].content).toBe('ok\n[Image unavailable]');
+  });
+});
+
+describe('sendImage', () => {
+  afterEach(() => {
+    spawnMock.mockReset();
+    vi.useRealTimers();
+  });
+
+  it('sends an attachment RPC with optional caption', async () => {
+    const { channel } = makeChannel();
+    const proc = await connectWithFakeProc(channel);
+
+    const p = channel.sendImage!('signal:+123', '/host/path/pic.jpg', 'hello');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const req = JSON.parse(proc.stdin.writes[0].trim());
+    expect(req.method).toBe('send');
+    expect(req.params.attachment).toEqual(['/host/path/pic.jpg']);
+    expect(req.params.recipient).toEqual(['+123']);
+    expect(req.params.message).toBe('hello');
+
+    emitStdout(
+      proc,
+      JSON.stringify({ jsonrpc: '2.0', id: req.id, result: {} }) + '\n',
+    );
+    await p;
   });
 });
 

@@ -1,7 +1,10 @@
 import { ChildProcess, spawn } from 'child_process';
+import fs from 'fs';
+import path from 'path';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
+import { ingestImage } from '../image-ingest.js';
 import { logger } from '../logger.js';
 import { parseSignalStyles } from '../text-styles.js';
 import { Channel, NewMessage } from '../types.js';
@@ -10,6 +13,30 @@ import { registerChannel, ChannelOpts } from './registry.js';
 const RPC_TIMEOUT_MS = 30_000;
 const READY_DELAY_MS = 1_000;
 const SEND_CHUNK_SIZE = 2_000;
+
+const SIGNAL_ATTACHMENTS_DIR =
+  process.env.SIGNAL_ATTACHMENTS_DIR ||
+  `${process.env.HOME}/.local/share/signal-cli/attachments`;
+
+const MIME_TO_EXT: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+};
+
+/**
+ * Resolve an attachment id to its on-disk path inside signal-cli's attachments
+ * dir, rejecting any traversal attempts (e.g. "../foo").
+ */
+function resolveSafeAttachmentPath(id: string, baseDir: string): string | null {
+  const resolved = path.resolve(baseDir, id);
+  if (!resolved.startsWith(baseDir + path.sep)) {
+    logger.warn({ id }, 'Signal attachment id escapes attachments directory');
+    return null;
+  }
+  return resolved;
+}
 
 export function chunkText(text: string, max: number): string[] {
   if (text.length <= max) return [text];
@@ -132,8 +159,13 @@ export class SignalChannel implements Channel {
     const dataMessage = envelope.dataMessage;
     if (!dataMessage) return;
 
+    const attachments: any[] = dataMessage.attachments || [];
+    const imageAttachment = attachments.find(
+      (a) => a?.contentType?.startsWith('image/') && a?.id,
+    );
+
     const text = dataMessage.message;
-    if (!text) return;
+    if (!text && !imageAttachment) return;
 
     const source =
       envelope.sourceNumber || envelope.sourceUuid || envelope.source;
@@ -152,7 +184,7 @@ export class SignalChannel implements Channel {
       ? groupInfo.groupName || groupInfo.groupId
       : sourceName;
 
-    let content = text;
+    let content = text || '';
 
     // Translate "@Andy …" in group chats into the configured trigger form so
     // the router's trigger check fires.
@@ -173,13 +205,44 @@ export class SignalChannel implements Channel {
 
     this.opts.onChatMetadata(chatJid, timestamp, chatName, 'signal', isGroup);
 
-    if (!this.opts.registeredGroups()[chatJid]) {
+    const group = this.opts.registeredGroups()[chatJid];
+    if (!group) {
       logger.debug(
         { chatJid, chatName },
         'Message from unregistered Signal chat',
       );
       return;
     }
+
+    if (imageAttachment) {
+      let marker: string | null = null;
+      const safePath = resolveSafeAttachmentPath(
+        imageAttachment.id,
+        SIGNAL_ATTACHMENTS_DIR,
+      );
+      if (safePath) {
+        try {
+          const data = fs.readFileSync(safePath);
+          const ext = MIME_TO_EXT[imageAttachment.contentType] || '.jpg';
+          marker = ingestImage(
+            data,
+            'sig',
+            imageAttachment.id,
+            ext,
+            group.folder,
+          );
+        } catch (err) {
+          logger.warn(
+            { err, chatJid, id: imageAttachment.id },
+            'Failed to read Signal image attachment',
+          );
+        }
+      }
+      const finalMarker = marker ?? '[Image unavailable]';
+      content = content ? `${content}\n${finalMarker}` : finalMarker;
+    }
+
+    if (!content) return;
 
     const newMessage: NewMessage = {
       id: String(envelope.timestamp),
@@ -255,6 +318,36 @@ export class SignalChannel implements Channel {
       logger.info({ jid, length: text.length }, 'Signal message sent');
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Signal message');
+    }
+  }
+
+  async sendImage(
+    jid: string,
+    filePath: string,
+    caption?: string,
+  ): Promise<void> {
+    if (!this.proc) {
+      logger.warn('Signal not connected');
+      return;
+    }
+    try {
+      const params: Record<string, any> = {
+        ...this.recipientParams(jid),
+        attachment: [filePath],
+      };
+      if (caption) {
+        const { text: plainText, textStyle } = parseSignalStyles(caption);
+        params.message = plainText;
+        if (textStyle.length > 0) {
+          params.textStyle = textStyle.map(
+            (s) => `${s.start}:${s.length}:${s.style}`,
+          );
+        }
+      }
+      await this.sendRpc('send', params);
+      logger.info({ jid, filePath }, 'Signal image sent');
+    } catch (err) {
+      logger.error({ jid, err }, 'Failed to send Signal image');
     }
   }
 

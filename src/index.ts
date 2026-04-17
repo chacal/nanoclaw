@@ -772,6 +772,18 @@ async function main(): Promise<void> {
       if (!text) return Promise.resolve();
       return channel.sendMessage(jid, text);
     },
+    sendImage: async (jid, filePath, caption) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (channel.sendImage) {
+        await channel.sendImage(jid, filePath, caption);
+        return;
+      }
+      const fallback = caption
+        ? `[Image could not be sent] ${caption}`
+        : '[Image could not be sent]';
+      await channel.sendMessage(jid, fallback);
+    },
     registeredGroups: () => registeredGroups,
     registerGroup,
     syncGroups: async (force: boolean) => {

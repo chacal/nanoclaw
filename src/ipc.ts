@@ -6,12 +6,13 @@ import { CronExpressionParser } from 'cron-parser';
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
-import { isValidGroupFolder } from './group-folder.js';
+import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendImage: (jid: string, filePath: string, caption?: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -23,6 +24,41 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   onTasksChanged: () => void;
+}
+
+/**
+ * Resolve an agent-supplied image path to a host-side absolute path, guarding
+ * against traversal outside the source group's folder.
+ */
+function resolveImagePath(
+  sourceFolder: string,
+  relativePath: string,
+): string | null {
+  try {
+    const groupDir = resolveGroupFolderPath(sourceFolder);
+    const resolved = path.resolve(groupDir, relativePath);
+    if (!resolved.startsWith(groupDir + path.sep)) {
+      logger.warn(
+        { sourceFolder, relativePath },
+        'IPC image path escapes group folder',
+      );
+      return null;
+    }
+    if (!fs.existsSync(resolved)) {
+      logger.warn(
+        { sourceFolder, relativePath },
+        'IPC image path does not exist on host',
+      );
+      return null;
+    }
+    return resolved;
+  } catch (err) {
+    logger.warn(
+      { sourceFolder, relativePath, err },
+      'Failed to resolve IPC image path',
+    );
+    return null;
+  }
 }
 
 let ipcWatcherRunning = false;
@@ -90,6 +126,41 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   logger.warn(
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC message attempt blocked',
+                  );
+                }
+              } else if (
+                data.type === 'image' &&
+                typeof data.chatJid === 'string' &&
+                typeof data.imagePath === 'string'
+              ) {
+                const targetGroup = registeredGroups[data.chatJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
+                  const hostPath = resolveImagePath(
+                    sourceGroup,
+                    data.imagePath,
+                  );
+                  if (hostPath) {
+                    const caption =
+                      typeof data.caption === 'string'
+                        ? data.caption
+                        : undefined;
+                    await deps.sendImage(data.chatJid, hostPath, caption);
+                    logger.info(
+                      {
+                        chatJid: data.chatJid,
+                        sourceGroup,
+                        imagePath: data.imagePath,
+                      },
+                      'IPC image sent',
+                    );
+                  }
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC image attempt blocked',
                   );
                 }
               }
