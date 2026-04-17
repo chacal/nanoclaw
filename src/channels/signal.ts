@@ -7,6 +7,7 @@ import { readEnvFile } from '../env.js';
 import { ingestImage } from '../image-ingest.js';
 import { logger } from '../logger.js';
 import { parseSignalStyles } from '../text-styles.js';
+import { transcribeAudio } from '../transcription.js';
 import { Channel, NewMessage } from '../types.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 
@@ -163,9 +164,12 @@ export class SignalChannel implements Channel {
     const imageAttachment = attachments.find(
       (a) => a?.contentType?.startsWith('image/') && a?.id,
     );
+    const voiceAttachment = attachments.find(
+      (a) => a?.contentType?.startsWith('audio/') && a?.id,
+    );
 
     const text = dataMessage.message;
-    if (!text && !imageAttachment) return;
+    if (!text && !imageAttachment && !voiceAttachment) return;
 
     const source =
       envelope.sourceNumber || envelope.sourceUuid || envelope.source;
@@ -240,6 +244,24 @@ export class SignalChannel implements Channel {
       }
       const finalMarker = marker ?? '[Image unavailable]';
       content = content ? `${content}\n${finalMarker}` : finalMarker;
+    }
+
+    if (voiceAttachment) {
+      const safePath = resolveSafeAttachmentPath(
+        voiceAttachment.id,
+        SIGNAL_ATTACHMENTS_DIR,
+      );
+      let marker = '[Voice message - unavailable]';
+      if (safePath) {
+        const transcript = await transcribeAudio(
+          safePath,
+          voiceAttachment.contentType,
+        );
+        marker = transcript
+          ? `[Voice: ${transcript}]`
+          : '[Voice message - transcription unavailable]';
+      }
+      content = content ? `${content}\n${marker}` : marker;
     }
 
     if (!content) return;

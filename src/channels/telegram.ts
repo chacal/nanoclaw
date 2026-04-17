@@ -9,6 +9,7 @@ import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { ingestImage } from '../image-ingest.js';
 import { logger } from '../logger.js';
+import { transcribeAudio } from '../transcription.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -363,18 +364,98 @@ export class TelegramChannel implements Channel {
         filename: `video_${ctx.message.message_id}`,
       });
     });
+    const transcribeAndDeliver = async (
+      ctx: any,
+      opts: { fileId?: string; filename: string; mimeType?: string },
+    ) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
+
+      const deliver = (content: string) =>
+        this.opts.onMessage(chatJid, {
+          id: ctx.message.message_id.toString(),
+          chat_jid: chatJid,
+          sender: ctx.from?.id?.toString() || '',
+          sender_name: senderName,
+          content,
+          timestamp,
+          is_from_me: false,
+        });
+
+      if (!opts.fileId) {
+        deliver(`[Voice message - no file]${caption}`);
+        return;
+      }
+
+      try {
+        if (!this.bot) throw new Error('Bot not connected');
+        const file = await this.bot.api.getFile(opts.fileId);
+        if (!file.file_path) {
+          deliver(`[Voice message - no file path]${caption}`);
+          return;
+        }
+        const groupDir = resolveGroupFolderPath(group.folder);
+        const attachDir = path.join(groupDir, 'attachments');
+        fs.mkdirSync(attachDir, { recursive: true });
+        const tgExt = path.extname(file.file_path);
+        const safeName = opts.filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const finalName = path.extname(safeName)
+          ? safeName
+          : `${safeName}${tgExt}`;
+        const hostPath = path.join(attachDir, finalName);
+
+        const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+        const resp = await fetch(url);
+        if (!resp.ok) {
+          deliver(`[Voice message - download failed]${caption}`);
+          return;
+        }
+        fs.writeFileSync(hostPath, Buffer.from(await resp.arrayBuffer()));
+
+        const transcript = await transcribeAudio(hostPath, opts.mimeType);
+        const marker = transcript
+          ? `[Voice: ${transcript}]`
+          : '[Voice message - transcription unavailable]';
+        deliver(`${marker}${caption}`);
+      } catch (err) {
+        logger.warn({ err, chatJid }, 'Failed to transcribe Telegram audio');
+        deliver(`[Voice message - error]${caption}`);
+      }
+    };
+
     this.bot.on('message:voice', (ctx) => {
-      storeMedia(ctx, '[Voice message]', {
+      transcribeAndDeliver(ctx, {
         fileId: ctx.message.voice?.file_id,
         filename: `voice_${ctx.message.message_id}`,
+        mimeType: ctx.message.voice?.mime_type,
       });
     });
     this.bot.on('message:audio', (ctx) => {
       const name =
         ctx.message.audio?.file_name || `audio_${ctx.message.message_id}`;
-      storeMedia(ctx, '[Audio]', {
+      transcribeAndDeliver(ctx, {
         fileId: ctx.message.audio?.file_id,
         filename: name,
+        mimeType: ctx.message.audio?.mime_type,
       });
     });
     this.bot.on('message:document', (ctx) => {
