@@ -4,6 +4,7 @@
  */
 import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -264,6 +265,22 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Google Workspace CLI config (read-write so gws can refresh its access token cache).
+  // Require both the ciphertext and its AES key to avoid mounting a half-initialized
+  // config dir — mounting without the key lets container code write into the cred dir
+  // in a state where gws can't actually decrypt, producing corrupt host-side state.
+  const gwsConfigDir = path.join(os.homedir(), '.config', 'gws');
+  if (
+    fs.existsSync(path.join(gwsConfigDir, 'credentials.enc')) &&
+    fs.existsSync(path.join(gwsConfigDir, '.encryption_key'))
+  ) {
+    mounts.push({
+      hostPath: gwsConfigDir,
+      containerPath: '/workspace/gws-config',
+      readonly: false,
+    });
+  }
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
@@ -285,6 +302,14 @@ function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Google Workspace CLI config directory and keyring backend (file-based for containers)
+  args.push(
+    '-e',
+    'GOOGLE_WORKSPACE_CLI_CONFIG_DIR=/workspace/gws-config',
+    '-e',
+    'GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file',
+  );
 
   // Route API traffic through the credential proxy (containers never see real secrets)
   const proxyBase = `http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`;
