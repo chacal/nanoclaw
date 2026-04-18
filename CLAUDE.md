@@ -2,6 +2,8 @@
 
 Personal Claude assistant. See [README.md](README.md) for philosophy and setup. See [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for architecture decisions.
 
+> **This is a customized fork.** Read [docs/FORK.md](docs/FORK.md) for the branch model (main/base/custom), native credential proxy + path routing, external HTTP API, custom integrations (HA, Wolfram, gws, Signal), and backup script. The file you're reading and the rest of `docs/` describe upstream; `FORK.md` describes what's different here.
+
 ## Quick Context
 
 Single Node.js process with skill-based channel system. Channels (WhatsApp, Telegram, Slack, Discord, Gmail) are skills that self-register at startup. Messages route to Claude Agent SDK running in containers (Linux VMs). Each group has isolated filesystem and memory.
