@@ -54,6 +54,12 @@ RUN npm run build
 COPY ha-api.sh /usr/local/bin/ha-api
 RUN chmod +x /usr/local/bin/ha-api
 
+# Install wolfram-alpha helper. WOLFRAM_API_URL is injected by the host runner
+# when Wolfram is configured; the appid is never visible inside the container —
+# the credential proxy injects it into the query string on the way out.
+COPY wolfram-alpha.sh /usr/local/bin/wolfram-alpha
+RUN chmod +x /usr/local/bin/wolfram-alpha
+
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
 

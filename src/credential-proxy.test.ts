@@ -1006,6 +1006,286 @@ describe('service routes — HA', () => {
   });
 });
 
+// --- Service routes: Wolfram Alpha ---
+// Reuses the same ServiceRoute dispatch as HA; the wrinkle is that Wolfram
+// uses `transformPath` to inject the appid into the query string (no Bearer),
+// so we exercise the transformPath hook too.
+describe('service routes — Wolfram', () => {
+  let proxyServer: http.Server;
+  let anthropicUpstream: http.Server;
+  let haUpstream: http.Server;
+  let wolframUpstream: http.Server;
+  let anthropicUpstreamPort: number;
+  let haUpstreamPort: number;
+  let wolframUpstreamPort: number;
+
+  type ReqRecord = {
+    headers: http.IncomingHttpHeaders;
+    path: string;
+    method: string;
+    body: string;
+  };
+  let anthropicReq: ReqRecord;
+  let haReq: ReqRecord;
+  let wolframReq: ReqRecord;
+
+  function createUpstream(): http.Server {
+    return http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        const data: ReqRecord = {
+          headers: { ...req.headers },
+          path: req.url || '',
+          method: req.method || '',
+          body: Buffer.concat(chunks).toString(),
+        };
+        const port = (req.socket.address() as AddressInfo).port;
+        if (port === anthropicUpstreamPort) Object.assign(anthropicReq, data);
+        else if (port === haUpstreamPort) Object.assign(haReq, data);
+        else if (port === wolframUpstreamPort) Object.assign(wolframReq, data);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+  }
+
+  const empty: ReqRecord = { headers: {}, path: '', method: '', body: '' };
+
+  beforeEach(async () => {
+    anthropicReq = { ...empty };
+    haReq = { ...empty };
+    wolframReq = { ...empty };
+    anthropicUpstream = createUpstream();
+    haUpstream = createUpstream();
+    wolframUpstream = createUpstream();
+    await Promise.all([
+      new Promise<void>((r) => anthropicUpstream.listen(0, '127.0.0.1', r)),
+      new Promise<void>((r) => haUpstream.listen(0, '127.0.0.1', r)),
+      new Promise<void>((r) => wolframUpstream.listen(0, '127.0.0.1', r)),
+    ]);
+    anthropicUpstreamPort = (anthropicUpstream.address() as AddressInfo).port;
+    haUpstreamPort = (haUpstream.address() as AddressInfo).port;
+    wolframUpstreamPort = (wolframUpstream.address() as AddressInfo).port;
+  });
+
+  afterEach(async () => {
+    await Promise.all([
+      new Promise<void>((r) => proxyServer?.close(() => r())),
+      new Promise<void>((r) => anthropicUpstream?.close(() => r())),
+      new Promise<void>((r) => haUpstream?.close(() => r())),
+      new Promise<void>((r) => wolframUpstream?.close(() => r())),
+    ]);
+    for (const key of Object.keys(mockEnv)) delete mockEnv[key];
+  });
+
+  async function startProxy(env: Record<string, string> = {}): Promise<number> {
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${anthropicUpstreamPort}`,
+      HA_URL: `http://127.0.0.1:${haUpstreamPort}`,
+      HA_TOKEN: 'ha-secret-token',
+      WOLFRAM_APP_ID: 'wolf-secret-id',
+      WOLFRAM_URL: `http://127.0.0.1:${wolframUpstreamPort}`,
+      ...env,
+    });
+    proxyServer = await startCredentialProxy(0);
+    return (proxyServer.address() as AddressInfo).port;
+  }
+
+  it('strips /wolfram prefix and reaches Wolfram upstream', async () => {
+    const port = await startProxy();
+    await makeRequest(port, {
+      method: 'GET',
+      path: '/wolfram/v1/simple?i=pi',
+    });
+    expect(wolframReq.path).toBe('/v1/simple?i=pi&appid=wolf-secret-id');
+  });
+
+  it('injects appid query param when caller omits it', async () => {
+    const port = await startProxy();
+    await makeRequest(port, {
+      method: 'GET',
+      path: '/wolfram/v1/simple?i=integrate%20x',
+    });
+    const url = new URL(wolframReq.path, 'http://dummy');
+    expect(url.searchParams.get('appid')).toBe('wolf-secret-id');
+    expect(url.searchParams.get('i')).toBe('integrate x');
+  });
+
+  it('overwrites caller-supplied appid (container can not use its own)', async () => {
+    const port = await startProxy();
+    await makeRequest(port, {
+      method: 'GET',
+      path: '/wolfram/v1/simple?appid=container-forged&i=hi',
+    });
+    const url = new URL(wolframReq.path, 'http://dummy');
+    expect(url.searchParams.get('appid')).toBe('wolf-secret-id');
+    expect(url.searchParams.getAll('appid')).toEqual(['wolf-secret-id']);
+  });
+
+  it('preserves other query params alongside injected appid', async () => {
+    const port = await startProxy();
+    await makeRequest(port, {
+      method: 'GET',
+      path: '/wolfram/v1/simple?i=pi&units=metric&background=transparent',
+    });
+    const url = new URL(wolframReq.path, 'http://dummy');
+    expect(url.searchParams.get('i')).toBe('pi');
+    expect(url.searchParams.get('units')).toBe('metric');
+    expect(url.searchParams.get('background')).toBe('transparent');
+    expect(url.searchParams.get('appid')).toBe('wolf-secret-id');
+  });
+
+  it('blocks /wolfram/v2/admin with 403 (not under /v1/)', async () => {
+    const port = await startProxy();
+    const res = await makeRequest(port, {
+      method: 'GET',
+      path: '/wolfram/v2/admin',
+    });
+    expect(res.statusCode).toBe(403);
+    expect(wolframReq.path).toBe('');
+  });
+
+  it('blocks /wolfram/ with 403 (empty after prefix)', async () => {
+    const port = await startProxy();
+    const res = await makeRequest(port, { method: 'GET', path: '/wolfram/' });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('returns 403 for /wolfram/* when Wolfram is not configured', async () => {
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${anthropicUpstreamPort}`,
+    });
+    proxyServer = await startCredentialProxy(0);
+    const port = (proxyServer.address() as AddressInfo).port;
+
+    const res = await makeRequest(port, {
+      method: 'GET',
+      path: '/wolfram/v1/simple?i=hi',
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('blocks traversal from /wolfram into Anthropic paths', async () => {
+    const port = await startProxy();
+    const res = await makeRequest(port, {
+      method: 'GET',
+      path: '/wolfram/v1/simple/../v1/messages',
+    });
+    // Normalized to /wolfram/v1/messages — still in Wolfram dispatch. With
+    // the narrowed `/v1/simple` allowlist, /v1/messages fails the allowlist
+    // check and 403s. Neither upstream is contacted.
+    expect(res.statusCode).toBe(403);
+    expect(anthropicReq.path).toBe('');
+    expect(wolframReq.path).toBe('');
+  });
+
+  it('rejects non-GET methods on /wolfram with 405', async () => {
+    const port = await startProxy();
+    const res = await makeRequest(port, {
+      method: 'POST',
+      path: '/wolfram/v1/simple?i=pi',
+    });
+    expect(res.statusCode).toBe(405);
+    expect(wolframReq.path).toBe('');
+  });
+
+  it('blocks /wolfram/v1/result (not an allowed endpoint)', async () => {
+    const port = await startProxy();
+    const res = await makeRequest(port, {
+      method: 'GET',
+      path: '/wolfram/v1/result?i=pi',
+    });
+    expect(res.statusCode).toBe(403);
+    expect(wolframReq.path).toBe('');
+  });
+
+  it('scrubs appid from upstream Location on redirect', async () => {
+    // Swap the Wolfram upstream with one that always 302s with appid echoed
+    // back in the Location header.
+    await new Promise<void>((r) => wolframUpstream.close(() => r()));
+    wolframUpstream = http.createServer((_req, res) => {
+      res.writeHead(302, {
+        location: '/v1/simple?i=pi&appid=wolf-secret-id&units=metric',
+      });
+      res.end();
+    });
+    await new Promise<void>((r) =>
+      wolframUpstream.listen(wolframUpstreamPort, '127.0.0.1', r),
+    );
+
+    const port = await startProxy();
+    const res = await makeRequest(port, {
+      method: 'GET',
+      path: '/wolfram/v1/simple?i=pi',
+    });
+
+    expect(res.statusCode).toBe(302);
+    expect(res.headers['location']).toBeDefined();
+    expect(res.headers['location']).not.toContain('appid');
+    expect(res.headers['location']).toContain('i=pi');
+  });
+
+  it('Wolfram appid does NOT leak into HA requests', async () => {
+    const port = await startProxy();
+    await makeRequest(port, { method: 'GET', path: '/ha/api/states' });
+    expect(haReq.path).toBe('/api/states');
+    expect(haReq.path).not.toContain('appid');
+  });
+
+  it('Wolfram appid does NOT leak into Anthropic requests', async () => {
+    const port = await startProxy();
+    await makeRequest(port, {
+      method: 'POST',
+      path: '/v1/messages',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(anthropicReq.path).toBe('/v1/messages');
+    expect(anthropicReq.path).not.toContain('appid');
+  });
+
+  it('Anthropic API key does NOT leak into Wolfram requests', async () => {
+    const port = await startProxy();
+    await makeRequest(port, {
+      method: 'GET',
+      path: '/wolfram/v1/simple?i=hi',
+      headers: { 'x-api-key': 'sk-client-supplied' },
+    });
+    expect(wolframReq.headers['x-api-key']).toBeUndefined();
+    expect(wolframReq.headers['authorization']).toBeUndefined();
+  });
+
+  it('HA token does NOT leak into Wolfram requests', async () => {
+    const port = await startProxy();
+    await makeRequest(port, {
+      method: 'GET',
+      path: '/wolfram/v1/simple?i=hi',
+      headers: { authorization: 'Bearer ha-secret-token' },
+    });
+    // Wolfram uses query-string auth; no Authorization header should be set.
+    expect(wolframReq.headers['authorization']).toBeUndefined();
+  });
+
+  it('returns 502 when Wolfram upstream is unreachable', async () => {
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${anthropicUpstreamPort}`,
+      WOLFRAM_APP_ID: 'wolf-secret-id',
+      WOLFRAM_URL: 'http://127.0.0.1:59999',
+    });
+    proxyServer = await startCredentialProxy(0);
+    const port = (proxyServer.address() as AddressInfo).port;
+
+    const res = await makeRequest(port, {
+      method: 'GET',
+      path: '/wolfram/v1/simple?i=hi',
+    });
+    expect(res.statusCode).toBe(502);
+  });
+});
+
 // --- OAuth token refresh (auto-refresh + retry + rotation + dedup) ---
 //
 // These tests use vi.resetModules() + vi.doMock('https', ...) to intercept

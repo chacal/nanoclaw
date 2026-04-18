@@ -108,12 +108,23 @@ interface ServiceRoute {
    * via `/ha/configuration`.
    */
   allowedPaths: readonly string[];
+  /**
+   * HTTP methods allowed on this route. If omitted, all methods pass — set
+   * this for read-only routes to block POST / DELETE from the container.
+   */
+  allowedMethods?: readonly string[];
   /** Mutate headers to inject route-specific credentials. */
   injectCredentials: (
     headers: Record<string, string | number | string[] | undefined>,
   ) => void;
   /** Optional: transform the upstream path (e.g. inject query params). */
   transformPath?: (path: string) => string;
+  /**
+   * Optional: mutate response headers before relaying them to the caller.
+   * Used to strip credentials that the upstream might echo back (e.g. the
+   * Wolfram `appid` in a 3xx `Location`).
+   */
+  scrubResponseHeaders?: (headers: import('http').IncomingHttpHeaders) => void;
 }
 
 /**
@@ -364,6 +375,8 @@ export function startCredentialProxy(
     'CLAUDE_CREDENTIALS_FILE',
     'HA_URL',
     'HA_TOKEN',
+    'WOLFRAM_APP_ID',
+    'WOLFRAM_URL',
   ]);
 
   const authMode: AuthMode = secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
@@ -411,6 +424,54 @@ export function startCredentialProxy(
     logger.info({ upstream: secrets.HA_URL }, 'HA service route registered');
   }
 
+  if (secrets.WOLFRAM_APP_ID) {
+    const wolframAppId = secrets.WOLFRAM_APP_ID;
+    const wolframUpstream =
+      secrets.WOLFRAM_URL || 'https://api.wolframalpha.com';
+    serviceRoutes.push({
+      prefix: '/wolfram',
+      upstream: new URL(wolframUpstream),
+      // Narrow to the exact endpoint `wolfram-alpha.sh` uses. /v1/result,
+      // /v1/conversation, etc. are all gated by the same appid upstream —
+      // blocking them here means the container can't probe endpoints the
+      // wrapper doesn't advertise.
+      allowedPaths: ['/v1/simple'],
+      allowedMethods: ['GET'],
+      injectCredentials: () => {
+        // No header-based auth — the appid is injected into the query string
+        // by transformPath below. Path-query injection (not header) matches
+        // Wolfram's auth model.
+      },
+      transformPath: (p) => {
+        // Overwrite any caller-supplied appid so the container can't reach
+        // Wolfram with its own (or an empty) key.
+        const url = new URL(p, 'http://dummy');
+        url.searchParams.set('appid', wolframAppId);
+        return url.pathname + url.search;
+      },
+      scrubResponseHeaders: (headers) => {
+        // If Wolfram ever 3xx-redirects, the `Location` header may echo the
+        // injected `appid`. Strip it before the container sees the response.
+        const loc = headers.location;
+        if (typeof loc === 'string' && loc.includes('appid=')) {
+          try {
+            // Location may be relative — parse against a dummy base.
+            const url = new URL(loc, 'http://dummy');
+            url.searchParams.delete('appid');
+            headers.location = url.pathname + url.search + url.hash;
+          } catch {
+            // Unparseable Location → drop it rather than leak.
+            delete headers.location;
+          }
+        }
+      },
+    });
+    logger.info(
+      { upstream: wolframUpstream },
+      'Wolfram service route registered',
+    );
+  }
+
   /** Build the headers forwarded to an upstream. Centralized so every route
    * (Anthropic and service routes) gets the same hop-by-hop scrub. */
   function prepareHeaders(
@@ -428,7 +489,10 @@ export function startCredentialProxy(
   }
 
   /** Forward a prepared request to the chosen upstream and pipe the response
-   * back. On error, emit a 502 once and strip the query string from the log. */
+   * back. On error, emit a 502 once and strip the query string from the log.
+   * `scrubResponseHeaders` runs on the upstream's response headers before we
+   * relay them, so routes with query-string auth can strip credentials that
+   * the upstream might echo back (e.g. Wolfram's appid in a 3xx Location). */
   function forwardRequest(
     targetUrl: URL,
     upstreamPath: string,
@@ -437,6 +501,9 @@ export function startCredentialProxy(
     body: Buffer,
     res: import('http').ServerResponse,
     logContext: string,
+    scrubResponseHeaders?: (
+      headers: import('http').IncomingHttpHeaders,
+    ) => void,
   ): void {
     const targetIsHttps = targetUrl.protocol === 'https:';
     const doRequest = targetIsHttps ? httpsRequest : httpRequest;
@@ -450,6 +517,7 @@ export function startCredentialProxy(
         headers,
       } as RequestOptions,
       (upRes) => {
+        if (scrubResponseHeaders) scrubResponseHeaders(upRes.headers);
         res.writeHead(upRes.statusCode!, upRes.headers);
         upRes.pipe(res);
       },
@@ -503,6 +571,23 @@ export function startCredentialProxy(
             return;
           }
 
+          if (
+            matchedRoute.allowedMethods &&
+            !matchedRoute.allowedMethods.includes(req.method || 'GET')
+          ) {
+            logger.warn(
+              {
+                method: req.method,
+                path: normalizedPath,
+                service: matchedRoute.prefix,
+              },
+              'Blocked request with disallowed method on service route',
+            );
+            res.writeHead(405);
+            res.end('Method Not Allowed');
+            return;
+          }
+
           const headers = prepareHeaders(req, matchedRoute.upstream.host, body);
           // Strip container-supplied auth-bearing headers before injecting
           // route credentials — prevents leaking Anthropic/Claude credentials
@@ -529,6 +614,7 @@ export function startCredentialProxy(
             body,
             res,
             `Service ${matchedRoute.prefix}`,
+            matchedRoute.scrubResponseHeaders,
           );
           return;
         }

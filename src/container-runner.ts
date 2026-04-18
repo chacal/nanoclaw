@@ -284,8 +284,13 @@ function buildContainerArgs(
 
   // Home Assistant proxy route. Only set when HA is configured on the host so
   // `ha-api.sh` fails loudly (missing env var) rather than silently 502'ing.
-  if (readEnvFile(['HA_URL']).HA_URL) {
+  const routingEnv = readEnvFile(['HA_URL', 'WOLFRAM_APP_ID']);
+  if (routingEnv.HA_URL) {
     args.push('-e', `HA_API_URL=${proxyBase}/ha`);
+  }
+  // Wolfram Alpha proxy route — same pattern as HA. Appid stays on the host.
+  if (routingEnv.WOLFRAM_APP_ID) {
+    args.push('-e', `WOLFRAM_API_URL=${proxyBase}/wolfram`);
   }
 
   // Mirror the host's auth method with a placeholder value.
