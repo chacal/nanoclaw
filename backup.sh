@@ -21,7 +21,8 @@ BACKUP_DIR="${BACKUP_ROOT}/${TIMESTAMP}"
 # External paths to include (these live outside the project dir)
 EXTERNAL_PATHS=(
   "$HOME/.local/share/signal-cli"                                # Signal identity & encryption keys
-  "$HOME/.config/nanoclaw"                                       # Mount/sender allowlists
+  "$HOME/.config/nanoclaw"                                       # Mount/sender allowlists + api-tokens.json
+  "$HOME/.config/gws"                                            # Google Workspace CLI encrypted creds + AES key
   "$HOME/.ssh/nanoclaw_deploy"                                   # GitHub deploy key (private)
   "$HOME/.ssh/nanoclaw_deploy.pub"                               # GitHub deploy key (public)
   "$HOME/.claude/plans"                                          # Claude Code plan files
