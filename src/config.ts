@@ -38,6 +38,12 @@ export const SENDER_ALLOWLIST_PATH = path.join(
   'nanoclaw',
   'sender-allowlist.json',
 );
+export const API_TOKENS_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'api-tokens.json',
+);
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
@@ -54,6 +60,10 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
 ); // 10MB default
 export const CREDENTIAL_PROXY_PORT = parseInt(
   process.env.CREDENTIAL_PROXY_PORT || '3001',
+  10,
+);
+export const VOICE_API_PORT = parseInt(
+  process.env.VOICE_API_PORT || '3002',
   10,
 );
 export const MAX_MESSAGES_PER_PROMPT = Math.max(

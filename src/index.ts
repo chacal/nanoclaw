@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  API_TOKENS_PATH,
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
   DEFAULT_TRIGGER,
@@ -11,7 +12,9 @@ import {
   MAX_MESSAGES_PER_PROMPT,
   POLL_INTERVAL,
   TIMEZONE,
+  VOICE_API_PORT,
 } from './config.js';
+import { loadApiTokens } from './api-tokens.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
 import {
@@ -70,6 +73,7 @@ import {
 } from './session-commands.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { startHttpApi } from './voice-api.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -745,6 +749,27 @@ async function main(): Promise<void> {
   if (channels.length === 0) {
     logger.fatal('No channels connected');
     process.exit(1);
+  }
+
+  // External HTTP API: /voice, /message, /webhook for iOS Shortcuts, HA automations, etc.
+  // Each bearer token binds to an identity (sender, senderName, isFromMe) via
+  // api-tokens.json; injected messages route through channelOpts.onMessage so
+  // storage + allowlist + trigger logic apply uniformly with channel input.
+  const mainGroupEntry = Object.entries(registeredGroups).find(
+    ([, g]) => g.isMain === true,
+  );
+  if (mainGroupEntry) {
+    const [mainJid] = mainGroupEntry;
+    const identities = loadApiTokens(API_TOKENS_PATH);
+    startHttpApi(VOICE_API_PORT, {
+      onMessage: channelOpts.onMessage,
+      defaultJid: mainJid,
+      identities,
+    });
+  } else {
+    logger.warn(
+      'HTTP API not started: no group marked isMain. Register a main group to enable /voice, /message, /webhook.',
+    );
   }
 
   // Start subsystems (independently of connection handler)
