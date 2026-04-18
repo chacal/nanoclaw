@@ -100,6 +100,20 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Rename is_trusted back to is_from_me for DBs migrated under the pre-v1.2.53
+  // rename refactor (old-main commit 44c340a) that never landed on custom. The
+  // column semantics are identical — the refactor renamed the identifier only.
+  // Idempotent: succeeds on old-main-shape DBs, fails harmlessly on
+  // upstream-shape DBs (where is_trusted doesn't exist) or already-renamed DBs
+  // (where is_from_me already exists).
+  try {
+    database.exec(
+      `ALTER TABLE messages RENAME COLUMN is_trusted TO is_from_me`,
+    );
+  } catch {
+    /* is_trusted missing or is_from_me already present — expected */
+  }
+
   // Add is_bot_message column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(

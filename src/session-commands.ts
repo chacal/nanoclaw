@@ -16,14 +16,14 @@ export function extractSessionCommand(
 }
 
 /**
- * Check if a session command sender is authorized.
- * Allowed: main group (any sender), or trusted/admin sender (is_from_me) in any group.
+ * Check if a session command sender is authorized. Admin capability lives on
+ * the sender (is_from_me), not on the chat. The pre-v1.2.53 "main group = admin"
+ * shortcut was dropped when the external HTTP API (Stage 8) made it possible for
+ * non-admin identities to inject messages into the main group — the shortcut
+ * would let them clear this gate contrary to the api-tokens contract.
  */
-export function isSessionCommandAllowed(
-  isMainGroup: boolean,
-  isFromMe: boolean,
-): boolean {
-  return isMainGroup || isFromMe;
+export function isSessionCommandAllowed(isFromMe: boolean): boolean {
+  return isFromMe;
 }
 
 /** Minimal agent result interface — matches the subset of ContainerOutput used here. */
@@ -61,20 +61,12 @@ function resultToText(result: string | object | null | undefined): string {
  */
 export async function handleSessionCommand(opts: {
   missedMessages: NewMessage[];
-  isMainGroup: boolean;
   groupName: string;
   triggerPattern: RegExp;
   timezone: string;
   deps: SessionCommandDeps;
 }): Promise<{ handled: false } | { handled: true; success: boolean }> {
-  const {
-    missedMessages,
-    isMainGroup,
-    groupName,
-    triggerPattern,
-    timezone,
-    deps,
-  } = opts;
+  const { missedMessages, groupName, triggerPattern, timezone, deps } = opts;
 
   const cmdMsg = missedMessages.find(
     (m) => extractSessionCommand(m.content, triggerPattern) !== null,
@@ -85,7 +77,7 @@ export async function handleSessionCommand(opts: {
 
   if (!command || !cmdMsg) return { handled: false };
 
-  if (!isSessionCommandAllowed(isMainGroup, cmdMsg.is_from_me === true)) {
+  if (!isSessionCommandAllowed(cmdMsg.is_from_me === true)) {
     // DENIED: send denial if the sender would normally be allowed to interact,
     // then silently consume the command by advancing the cursor past it.
     // Trade-off: other messages in the same batch are also consumed (cursor is

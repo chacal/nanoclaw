@@ -42,20 +42,15 @@ describe('extractSessionCommand', () => {
 });
 
 describe('isSessionCommandAllowed', () => {
-  it('allows main group regardless of sender', () => {
-    expect(isSessionCommandAllowed(true, false)).toBe(true);
+  it('allows trusted/admin sender (is_from_me)', () => {
+    expect(isSessionCommandAllowed(true)).toBe(true);
   });
 
-  it('allows trusted/admin sender (is_from_me) in non-main group', () => {
-    expect(isSessionCommandAllowed(false, true)).toBe(true);
-  });
-
-  it('denies untrusted sender in non-main group', () => {
-    expect(isSessionCommandAllowed(false, false)).toBe(false);
-  });
-
-  it('allows trusted sender in main group', () => {
-    expect(isSessionCommandAllowed(true, true)).toBe(true);
+  it('denies untrusted sender even in main group', () => {
+    // The pre-v1.2.53 "main group = admin" shortcut was removed when the
+    // external HTTP API (Stage 8) enabled non-admin identities to inject
+    // into the main group — allowing the shortcut would bypass the gate.
+    expect(isSessionCommandAllowed(false)).toBe(false);
   });
 });
 
@@ -96,7 +91,6 @@ describe('handleSessionCommand', () => {
     const deps = makeDeps();
     const result = await handleSessionCommand({
       missedMessages: [makeMsg('hello')],
-      isMainGroup: true,
       groupName: 'test',
       triggerPattern: trigger,
       timezone: 'UTC',
@@ -105,11 +99,10 @@ describe('handleSessionCommand', () => {
     expect(result.handled).toBe(false);
   });
 
-  it('handles authorized /compact in main group', async () => {
+  it('handles authorized /compact from admin sender', async () => {
     const deps = makeDeps();
     const result = await handleSessionCommand({
-      missedMessages: [makeMsg('/compact')],
-      isMainGroup: true,
+      missedMessages: [makeMsg('/compact', { is_from_me: true })],
       groupName: 'test',
       triggerPattern: trigger,
       timezone: 'UTC',
@@ -123,11 +116,10 @@ describe('handleSessionCommand', () => {
     expect(deps.advanceCursor).toHaveBeenCalledWith('100');
   });
 
-  it('sends denial to interactable sender in non-main group', async () => {
+  it('sends denial to interactable non-admin sender', async () => {
     const deps = makeDeps();
     const result = await handleSessionCommand({
       missedMessages: [makeMsg('/compact', { is_from_me: false })],
-      isMainGroup: false,
       groupName: 'test',
       triggerPattern: trigger,
       timezone: 'UTC',
@@ -147,7 +139,6 @@ describe('handleSessionCommand', () => {
     });
     const result = await handleSessionCommand({
       missedMessages: [makeMsg('/compact', { is_from_me: false })],
-      isMainGroup: false,
       groupName: 'test',
       triggerPattern: trigger,
       timezone: 'UTC',
@@ -161,12 +152,11 @@ describe('handleSessionCommand', () => {
   it('processes pre-compact messages before /compact', async () => {
     const deps = makeDeps();
     const msgs = [
-      makeMsg('summarize this', { timestamp: '99' }),
-      makeMsg('/compact', { timestamp: '100' }),
+      makeMsg('summarize this', { timestamp: '99', is_from_me: true }),
+      makeMsg('/compact', { timestamp: '100', is_from_me: true }),
     ];
     const result = await handleSessionCommand({
       missedMessages: msgs,
-      isMainGroup: true,
       groupName: 'test',
       triggerPattern: trigger,
       timezone: 'UTC',
@@ -186,23 +176,6 @@ describe('handleSessionCommand', () => {
     );
   });
 
-  it('allows is_from_me sender in non-main group', async () => {
-    const deps = makeDeps();
-    const result = await handleSessionCommand({
-      missedMessages: [makeMsg('/compact', { is_from_me: true })],
-      isMainGroup: false,
-      groupName: 'test',
-      triggerPattern: trigger,
-      timezone: 'UTC',
-      deps,
-    });
-    expect(result).toEqual({ handled: true, success: true });
-    expect(deps.runAgent).toHaveBeenCalledWith(
-      '/compact',
-      expect.any(Function),
-    );
-  });
-
   it('reports failure when command-stage runAgent returns error without streamed status', async () => {
     // runAgent resolves 'error' but callback never gets status: 'error'
     const deps = makeDeps({
@@ -212,8 +185,7 @@ describe('handleSessionCommand', () => {
       }),
     });
     const result = await handleSessionCommand({
-      missedMessages: [makeMsg('/compact')],
-      isMainGroup: true,
+      missedMessages: [makeMsg('/compact', { is_from_me: true })],
       groupName: 'test',
       triggerPattern: trigger,
       timezone: 'UTC',
@@ -228,12 +200,11 @@ describe('handleSessionCommand', () => {
   it('returns success:false on pre-compact failure with no output', async () => {
     const deps = makeDeps({ runAgent: vi.fn().mockResolvedValue('error') });
     const msgs = [
-      makeMsg('summarize this', { timestamp: '99' }),
-      makeMsg('/compact', { timestamp: '100' }),
+      makeMsg('summarize this', { timestamp: '99', is_from_me: true }),
+      makeMsg('/compact', { timestamp: '100', is_from_me: true }),
     ];
     const result = await handleSessionCommand({
       missedMessages: msgs,
-      isMainGroup: true,
       groupName: 'test',
       triggerPattern: trigger,
       timezone: 'UTC',

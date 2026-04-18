@@ -230,7 +230,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // --- Session command interception (before trigger check) ---
   const cmdResult = await handleSessionCommand({
     missedMessages,
-    isMainGroup,
     groupName: group.name,
     triggerPattern: getTriggerPattern(group.trigger),
     timezone: TIMEZONE,
@@ -527,12 +526,7 @@ async function startMessageLoop(): Promise<void> {
             // Only close active container if the sender is authorized — otherwise an
             // untrusted user could kill in-flight work by sending /compact (DoS).
             // closeStdin no-ops internally when no container is active.
-            if (
-              isSessionCommandAllowed(
-                isMainGroup,
-                loopCmdMsg.is_from_me === true,
-              )
-            ) {
+            if (isSessionCommandAllowed(loopCmdMsg.is_from_me === true)) {
               queue.closeStdin(chatJid);
             }
             // Enqueue so processGroupMessages handles auth + cursor advancement.
@@ -673,6 +667,17 @@ async function main(): Promise<void> {
       logger.warn(
         { chatJid, sender: msg.sender },
         'Remote control rejected: not main group',
+      );
+      return;
+    }
+    // Admin-only: must come from a sender with is_from_me. Prevents HTTP-API
+    // identities with isFromMe=false from starting a shell-access session,
+    // which the intercept-before-allowlist path in onMessage would otherwise
+    // permit (the early return skips the sender-allowlist drop check).
+    if (!msg.is_from_me) {
+      logger.warn(
+        { chatJid, sender: msg.sender },
+        'Remote control rejected: sender not admin (is_from_me=false)',
       );
       return;
     }
