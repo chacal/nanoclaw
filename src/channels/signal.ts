@@ -62,6 +62,9 @@ export class SignalChannel implements Channel {
     { resolve: (v: any) => void; reject: (e: Error) => void }
   >();
   private lineBuffer = '';
+  /** Maps phone numbers and UUIDs to display names so mentions carrying
+   *  signal-cli's phone/UUID fallback can be resolved to a real name. */
+  private nameCache = new Map<string, string>();
 
   constructor(phoneNumber: string, signalCliPath: string, opts: ChannelOpts) {
     this.phoneNumber = phoneNumber;
@@ -131,9 +134,41 @@ export class SignalChannel implements Channel {
           console.log(`\n  Signal: ${this.phoneNumber}`);
           console.log(`  Send a message to this number to start chatting\n`);
           settle();
+          this.prefillNameCache().catch((err) => {
+            logger.debug({ err }, 'Failed to prefill Signal name cache');
+          });
         }
       }, READY_DELAY_MS);
     });
+  }
+
+  /**
+   * Fetch contacts via signal-cli's JSON-RPC so mentions can be resolved to
+   * display names from the very first inbound group message. Best-effort:
+   * failures are logged and swallowed.
+   */
+  private async prefillNameCache(): Promise<void> {
+    const contacts: any[] = await this.sendRpc('listContacts', {});
+    if (!Array.isArray(contacts)) return;
+    let count = 0;
+    for (const c of contacts) {
+      const name = c?.profileName || c?.name;
+      if (!name) continue;
+      if (c.number && name !== c.number) {
+        this.nameCache.set(c.number, name);
+        count++;
+      }
+      if (c.uuid && name !== c.uuid) {
+        this.nameCache.set(c.uuid, name);
+        count++;
+      }
+    }
+    if (count > 0) {
+      logger.info(
+        { entries: count },
+        'Signal name cache prefilled from contacts',
+      );
+    }
   }
 
   private handleLine(line: string): void {
@@ -190,6 +225,17 @@ export class SignalChannel implements Channel {
     const sourceName = envelope.sourceName || source;
     const timestamp = new Date(envelope.timestamp || Date.now()).toISOString();
 
+    // Cache sender identifiers → display name, so later messages that
+    // mention this user (and carry only a phone/UUID as `name`) can be
+    // reconstructed with the real name.
+    if (sourceName && sourceName !== source) {
+      this.nameCache.set(source, sourceName);
+    }
+    const sourceUuid = envelope.sourceUuid;
+    if (sourceUuid && sourceName && sourceName !== sourceUuid) {
+      this.nameCache.set(sourceUuid, sourceName);
+    }
+
     const groupInfo = dataMessage.groupInfo;
     const isGroup = !!groupInfo;
     const chatJid =
@@ -201,6 +247,30 @@ export class SignalChannel implements Channel {
       : sourceName;
 
     let content = text || '';
+
+    // Signal transmits mentions as U+FFFC (object replacement character) in
+    // the message body with the actual mention data in dataMessage.mentions.
+    // Reconstruct "@name" spans so the trigger pattern check + human readers
+    // see names instead of opaque placeholders.
+    const mentions: any[] = dataMessage.mentions || [];
+    if (mentions.length > 0 && content) {
+      // Descending start order so each slice-and-splice doesn't shift the
+      // indices of mentions that follow.
+      const sorted = [...mentions].sort(
+        (a, b) => (b.start ?? 0) - (a.start ?? 0),
+      );
+      for (const m of sorted) {
+        const start = m.start ?? 0;
+        const len = m.length ?? 1;
+        // Guard against malformed mention data (out-of-range start) to avoid
+        // silent truncation of the message body.
+        if (start < 0 || start >= content.length) continue;
+        const isSelf = m.number === this.phoneNumber;
+        const name = isSelf ? ASSISTANT_NAME : this.resolveMentionName(m);
+        content =
+          content.slice(0, start) + `@${name}` + content.slice(start + len);
+      }
+    }
 
     // Translate "@Andy …" in group chats into the configured trigger form so
     // the router's trigger check fires.
@@ -292,6 +362,29 @@ export class SignalChannel implements Channel {
       { chatJid, chatName, sender: sourceName },
       'Signal message stored',
     );
+  }
+
+  /**
+   * Resolve a mention payload to a display name. signal-cli frequently puts
+   * the phone number or UUID into `name` when the user isn't a saved contact;
+   * fall back to the cache of names we've seen or been told about.
+   */
+  private resolveMentionName(mention: any): string {
+    const { name, number: num, uuid } = mention;
+    // A real name doesn't look like a phone number (starts with +) or a UUID
+    // (8-hex-dash-...); if signal-cli gave us one, trust it.
+    if (name && !name.startsWith('+') && !/^[0-9a-f]{8}-/.test(name)) {
+      return name;
+    }
+    if (num) {
+      const cached = this.nameCache.get(num);
+      if (cached) return cached;
+    }
+    if (uuid) {
+      const cached = this.nameCache.get(uuid);
+      if (cached) return cached;
+    }
+    return name || 'unknown';
   }
 
   private sendRpc(method: string, params: any): Promise<any> {

@@ -85,6 +85,21 @@ async function connectWithFakeProc(channel: SignalChannel): Promise<FakeProc> {
   vi.advanceTimersByTime(1100);
   vi.useRealTimers();
   await connectPromise;
+
+  // connect() fires prefillNameCache (fire-and-forget listContacts RPC).
+  // Drain it so tests that inspect stdin writes see their own RPC first.
+  await new Promise((r) => setImmediate(r));
+  if (proc.stdin.writes.length > 0) {
+    const first = JSON.parse(proc.stdin.writes[0].trim());
+    if (first.method === 'listContacts') {
+      emitStdout(
+        proc,
+        JSON.stringify({ jsonrpc: '2.0', id: first.id, result: [] }) + '\n',
+      );
+      await new Promise((r) => setImmediate(r));
+      proc.stdin.writes.shift();
+    }
+  }
   return proc;
 }
 
@@ -594,5 +609,300 @@ describe('setTyping', () => {
     const proc = await connectWithFakeProc(channel);
     await channel.setTyping('signal:+123', false);
     expect(proc.stdin.writes.length).toBe(0);
+  });
+});
+
+// --- mention reconstruction -----------------------------------------------
+
+describe('mention reconstruction', () => {
+  afterEach(() => {
+    spawnMock.mockReset();
+    vi.useRealTimers();
+  });
+
+  function emitNotification(proc: FakeProc, params: any): void {
+    emitStdout(proc, JSON.stringify({ method: 'receive', params }) + '\n');
+  }
+
+  async function setup() {
+    const { channel, onMessage, groups } = makeChannel('+15559999999');
+    groups['signal:test-group'] = { name: 'Group', folder: 'family' };
+    const proc = await connectWithFakeProc(channel);
+    return { channel, onMessage, groups, proc };
+  }
+
+  it('replaces U+FFFC with @<real-name> when mention.name is a real name', async () => {
+    const { proc, onMessage } = await setup();
+    emitNotification(proc, {
+      envelope: {
+        sourceNumber: '+15551234567',
+        sourceName: 'Alice',
+        timestamp: 1700000000000,
+        dataMessage: {
+          message: 'hey \uFFFC check this',
+          groupInfo: { groupId: 'test-group', groupName: 'Group' },
+          mentions: [
+            { name: 'Bob', number: '+15550000000', start: 4, length: 1 },
+          ],
+        },
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(onMessage).toHaveBeenCalledWith(
+      'signal:test-group',
+      expect.objectContaining({ content: 'hey @Bob check this' }),
+    );
+  });
+
+  it('resolves phone-number mention via cache (populated from earlier message)', async () => {
+    const { proc, onMessage } = await setup();
+    // Seed the cache: Jouni sends a message.
+    emitNotification(proc, {
+      envelope: {
+        sourceNumber: '+15550000000',
+        sourceName: 'Jouni',
+        timestamp: 1700000000000,
+        dataMessage: {
+          message: 'hi',
+          groupInfo: { groupId: 'test-group', groupName: 'Group' },
+        },
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Alice mentions Jouni — m.name is the phone number.
+    emitNotification(proc, {
+      envelope: {
+        sourceNumber: '+15551234567',
+        sourceName: 'Alice',
+        timestamp: 1700000001000,
+        dataMessage: {
+          message: 'hey \uFFFC',
+          groupInfo: { groupId: 'test-group', groupName: 'Group' },
+          mentions: [
+            {
+              name: '+15550000000',
+              number: '+15550000000',
+              start: 4,
+              length: 1,
+            },
+          ],
+        },
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(onMessage).toHaveBeenLastCalledWith(
+      'signal:test-group',
+      expect.objectContaining({ content: 'hey @Jouni' }),
+    );
+  });
+
+  it('falls back to phone number when the cache has no entry', async () => {
+    const { proc, onMessage } = await setup();
+    emitNotification(proc, {
+      envelope: {
+        sourceNumber: '+15551234567',
+        sourceName: 'Alice',
+        timestamp: 1700000000000,
+        dataMessage: {
+          message: 'hey \uFFFC',
+          groupInfo: { groupId: 'test-group', groupName: 'Group' },
+          mentions: [
+            {
+              name: '+15550000000',
+              number: '+15550000000',
+              start: 4,
+              length: 1,
+            },
+          ],
+        },
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(onMessage).toHaveBeenCalledWith(
+      'signal:test-group',
+      expect.objectContaining({ content: 'hey @+15550000000' }),
+    );
+  });
+
+  it('maps mention targeting the bot itself to ASSISTANT_NAME (trigger match)', async () => {
+    const { proc, onMessage } = await setup();
+    emitNotification(proc, {
+      envelope: {
+        sourceNumber: '+15551234567',
+        sourceName: 'Alice',
+        timestamp: 1700000000000,
+        dataMessage: {
+          message: '\uFFFC hey',
+          groupInfo: { groupId: 'test-group', groupName: 'Group' },
+          mentions: [
+            {
+              name: '+15559999999',
+              number: '+15559999999',
+              start: 0,
+              length: 1,
+            },
+          ],
+        },
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(onMessage).toHaveBeenCalledWith(
+      'signal:test-group',
+      expect.objectContaining({ content: '@Andy hey' }),
+    );
+  });
+
+  it('resolves UUID-based mentions via cache', async () => {
+    const { proc, onMessage } = await setup();
+    const uuid = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+    emitNotification(proc, {
+      envelope: {
+        sourceNumber: '+15550000000',
+        sourceUuid: uuid,
+        sourceName: 'Oona',
+        timestamp: 1700000000000,
+        dataMessage: {
+          message: 'hi',
+          groupInfo: { groupId: 'test-group', groupName: 'Group' },
+        },
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    emitNotification(proc, {
+      envelope: {
+        sourceNumber: '+15551234567',
+        sourceName: 'Alice',
+        timestamp: 1700000001000,
+        dataMessage: {
+          message: '\uFFFC hello',
+          groupInfo: { groupId: 'test-group', groupName: 'Group' },
+          mentions: [
+            { name: uuid, number: '+15550000000', uuid, start: 0, length: 1 },
+          ],
+        },
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(onMessage).toHaveBeenLastCalledWith(
+      'signal:test-group',
+      expect.objectContaining({ content: '@Oona hello' }),
+    );
+  });
+
+  it('handles multiple mentions with correct index ordering', async () => {
+    const { proc, onMessage } = await setup();
+    emitNotification(proc, {
+      envelope: {
+        sourceNumber: '+15551234567',
+        sourceName: 'Alice',
+        timestamp: 1700000000000,
+        dataMessage: {
+          message: '\uFFFC and \uFFFC',
+          groupInfo: { groupId: 'test-group', groupName: 'Group' },
+          mentions: [
+            { name: 'Bob', number: '+15550000001', start: 0, length: 1 },
+            { name: 'Carol', number: '+15550000002', start: 6, length: 1 },
+          ],
+        },
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(onMessage).toHaveBeenCalledWith(
+      'signal:test-group',
+      expect.objectContaining({ content: '@Bob and @Carol' }),
+    );
+  });
+
+  it('skips malformed mentions with out-of-range start', async () => {
+    const { proc, onMessage } = await setup();
+    emitNotification(proc, {
+      envelope: {
+        sourceNumber: '+15551234567',
+        sourceName: 'Alice',
+        timestamp: 1700000000000,
+        dataMessage: {
+          message: 'hello',
+          groupInfo: { groupId: 'test-group', groupName: 'Group' },
+          mentions: [
+            { name: 'Bob', number: '+15550000001', start: 999, length: 1 },
+          ],
+        },
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(onMessage).toHaveBeenCalledWith(
+      'signal:test-group',
+      expect.objectContaining({ content: 'hello' }),
+    );
+  });
+
+  it('prefills cache from listContacts at startup', async () => {
+    const { channel, onMessage, groups } = makeChannel('+15559999999');
+    groups['signal:test-group'] = { name: 'Group', folder: 'family' };
+
+    const proc = new FakeProc();
+    spawnMock.mockReturnValueOnce(proc);
+    vi.useFakeTimers();
+    const connectPromise = channel.connect();
+    vi.advanceTimersByTime(1100);
+    await connectPromise;
+    vi.useRealTimers();
+
+    // connect() fires prefillNameCache after settling — let the microtask run.
+    await new Promise((r) => setImmediate(r));
+
+    // Respond to the listContacts RPC that prefillNameCache issued.
+    const rpcRequest = JSON.parse(proc.stdin.writes[0].trim());
+    expect(rpcRequest.method).toBe('listContacts');
+    emitStdout(
+      proc,
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: rpcRequest.id,
+        result: [
+          {
+            number: '+15550000000',
+            uuid: 'aaaa-bbbb-cccc',
+            profileName: 'Jouni Hartikainen',
+          },
+          { number: '+15550000001', name: 'Venla' },
+          { number: '+15550000002' },
+        ],
+      }) + '\n',
+    );
+    await new Promise((r) => setImmediate(r));
+
+    emitStdout(
+      proc,
+      JSON.stringify({
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+15551234567',
+            sourceName: 'Alice',
+            timestamp: 1700000001000,
+            dataMessage: {
+              message: '\uFFFC hello',
+              groupInfo: { groupId: 'test-group', groupName: 'Group' },
+              mentions: [
+                {
+                  name: '+15550000000',
+                  number: '+15550000000',
+                  start: 0,
+                  length: 1,
+                },
+              ],
+            },
+          },
+        },
+      }) + '\n',
+    );
+    await new Promise((r) => setImmediate(r));
+    expect(onMessage).toHaveBeenCalledWith(
+      'signal:test-group',
+      expect.objectContaining({ content: '@Jouni Hartikainen hello' }),
+    );
   });
 });
