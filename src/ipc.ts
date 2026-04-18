@@ -121,7 +121,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && data.text) {
+              if (
+                data.type === 'message' &&
+                typeof data.chatJid === 'string' &&
+                typeof data.text === 'string'
+              ) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
                 if (
@@ -265,10 +269,10 @@ export async function processTaskIpc(
   switch (data.type) {
     case 'schedule_task':
       if (
-        data.prompt &&
-        data.schedule_type &&
-        data.schedule_value &&
-        data.targetJid
+        typeof data.prompt === 'string' &&
+        typeof data.schedule_type === 'string' &&
+        typeof data.schedule_value === 'string' &&
+        typeof data.targetJid === 'string'
       ) {
         // Resolve the target group from JID
         const targetJid = data.targetJid as string;
@@ -360,7 +364,7 @@ export async function processTaskIpc(
       break;
 
     case 'pause_task':
-      if (data.taskId) {
+      if (typeof data.taskId === 'string') {
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
           updateTask(data.taskId, { status: 'paused' });
@@ -379,7 +383,7 @@ export async function processTaskIpc(
       break;
 
     case 'resume_task':
-      if (data.taskId) {
+      if (typeof data.taskId === 'string') {
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
           updateTask(data.taskId, { status: 'active' });
@@ -398,7 +402,7 @@ export async function processTaskIpc(
       break;
 
     case 'cancel_task':
-      if (data.taskId) {
+      if (typeof data.taskId === 'string') {
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
           deleteTask(data.taskId);
@@ -417,7 +421,7 @@ export async function processTaskIpc(
       break;
 
     case 'update_task':
-      if (data.taskId) {
+      if (typeof data.taskId === 'string') {
         const task = getTaskById(data.taskId);
         if (!task) {
           logger.warn(
@@ -435,14 +439,16 @@ export async function processTaskIpc(
         }
 
         const updates: Parameters<typeof updateTask>[1] = {};
-        if (data.prompt !== undefined) updates.prompt = data.prompt;
-        if (data.script !== undefined) updates.script = data.script || null;
-        if (data.schedule_type !== undefined)
-          updates.schedule_type = data.schedule_type as
-            | 'cron'
-            | 'interval'
-            | 'once';
-        if (data.schedule_value !== undefined)
+        if (typeof data.prompt === 'string') updates.prompt = data.prompt;
+        if (typeof data.script === 'string')
+          updates.script = data.script || null;
+        if (
+          data.schedule_type === 'cron' ||
+          data.schedule_type === 'interval' ||
+          data.schedule_type === 'once'
+        )
+          updates.schedule_type = data.schedule_type;
+        if (typeof data.schedule_value === 'string')
           updates.schedule_value = data.schedule_value;
 
         // Recompute next_run if schedule changed
@@ -515,7 +521,12 @@ export async function processTaskIpc(
         );
         break;
       }
-      if (data.jid && data.name && data.folder && data.trigger) {
+      if (
+        typeof data.jid === 'string' &&
+        typeof data.name === 'string' &&
+        typeof data.folder === 'string' &&
+        typeof data.trigger === 'string'
+      ) {
         if (!isValidGroupFolder(data.folder)) {
           logger.warn(
             { sourceGroup, folder: data.folder },

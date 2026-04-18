@@ -133,6 +133,48 @@ function buildContent(text: string): string | ContentBlock[] {
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
+const IPC_WATCH_FALLBACK_MS = 2000; // Safety-net poll interval when fs.watch is available
+
+// fs.watch-based wakeup for IPC input files. Falls back to polling when the
+// watcher is unavailable (some bind-mounted filesystems don't support inotify).
+let ipcWatcher: fs.FSWatcher | null = null;
+let ipcWatchCallbacks: Array<() => void> = [];
+
+function initIpcWatcher(): void {
+  try {
+    ipcWatcher = fs.watch(IPC_INPUT_DIR, () => {
+      const cbs = ipcWatchCallbacks;
+      ipcWatchCallbacks = [];
+      for (const cb of cbs) cb();
+    });
+    ipcWatcher.on('error', () => {
+      ipcWatcher?.close();
+      ipcWatcher = null;
+    });
+  } catch {
+    ipcWatcher = null;
+  }
+}
+
+/** Wait for an IPC directory change. Resolves on fs.watch event, safety
+ *  timeout, or (when watch unavailable) poll timeout. */
+function waitForIpcEvent(): Promise<void> {
+  return new Promise((resolve) => {
+    if (ipcWatcher) {
+      const cb = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        ipcWatchCallbacks = ipcWatchCallbacks.filter((x) => x !== cb);
+        resolve();
+      }, IPC_WATCH_FALLBACK_MS);
+      ipcWatchCallbacks.push(cb);
+    } else {
+      setTimeout(resolve, IPC_POLL_MS);
+    }
+  });
+}
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -417,22 +459,13 @@ function drainIpcInput(): string[] {
  * Wait for a new IPC message or _close sentinel.
  * Returns the messages as a single string, or null if _close.
  */
-function waitForIpcMessage(): Promise<string | null> {
-  return new Promise((resolve) => {
-    const poll = () => {
-      if (shouldClose()) {
-        resolve(null);
-        return;
-      }
-      const messages = drainIpcInput();
-      if (messages.length > 0) {
-        resolve(messages.join('\n'));
-        return;
-      }
-      setTimeout(poll, IPC_POLL_MS);
-    };
-    poll();
-  });
+async function waitForIpcMessage(): Promise<string | null> {
+  while (true) {
+    if (shouldClose()) return null;
+    const messages = drainIpcInput();
+    if (messages.length > 0) return messages.join('\n');
+    await waitForIpcEvent();
+  }
 }
 
 /**
@@ -459,23 +492,24 @@ async function runQuery(
   // Poll IPC for follow-up messages and _close sentinel during the query
   let ipcPolling = true;
   let closedDuringQuery = false;
-  const pollIpcDuringQuery = () => {
-    if (!ipcPolling) return;
-    if (shouldClose()) {
-      log('Close sentinel detected during query, ending stream');
-      closedDuringQuery = true;
-      stream.end();
-      ipcPolling = false;
-      return;
+  const pollIpcDuringQuery = async () => {
+    while (ipcPolling) {
+      if (shouldClose()) {
+        log('Close sentinel detected during query, ending stream');
+        closedDuringQuery = true;
+        stream.end();
+        ipcPolling = false;
+        return;
+      }
+      const messages = drainIpcInput();
+      for (const text of messages) {
+        log(`Piping IPC message into active query (${text.length} chars)`);
+        stream.push(text);
+      }
+      await waitForIpcEvent();
     }
-    const messages = drainIpcInput();
-    for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
-    }
-    setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
-  setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
+  pollIpcDuringQuery();
 
   let newSessionId: string | undefined;
   let lastAssistantUuid: string | undefined;
@@ -681,6 +715,12 @@ async function runScript(script: string): Promise<ScriptResult | null> {
 }
 
 async function main(): Promise<void> {
+  // Initialize fs.watch on the IPC input directory so waitForIpcEvent can wake
+  // on inotify events instead of polling. The directory is created below, but
+  // initIpcWatcher is safe to call either before or after — it no-ops on failure.
+  fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
+  initIpcWatcher();
+
   let containerInput: ContainerInput;
 
   try {
@@ -913,4 +953,18 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+// Explicit process.exit(0) avoids a hang after the host writes _close: the SDK
+// and MCP servers leave open handles that prevent a natural exit, which would
+// block the host's group queue until the container hard-timeout fires. Before
+// exiting, flush stdout/stderr so the host parser sees the final output marker
+// pair; process.exit() on a pipe can otherwise drop buffered bytes.
+async function flushAndExit(code: number): Promise<never> {
+  await new Promise<void>((resolve) =>
+    process.stdout.write('', () => resolve()),
+  );
+  await new Promise<void>((resolve) =>
+    process.stderr.write('', () => resolve()),
+  );
+  process.exit(code);
+}
+main().then(() => flushAndExit(0));

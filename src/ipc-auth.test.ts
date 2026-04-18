@@ -678,3 +678,133 @@ describe('register_group success', () => {
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
   });
 });
+
+describe('IPC payload type validation', () => {
+  it('rejects schedule_task with non-string prompt', async () => {
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        // @ts-expect-error — exercising runtime guard against wrong type
+        prompt: { $ne: null },
+        schedule_type: 'once',
+        schedule_value: '2025-06-01T00:00:00',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(getAllTasks().length).toBe(0);
+  });
+
+  it('rejects schedule_task with non-string schedule_value', async () => {
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'do something',
+        schedule_type: 'once',
+        // @ts-expect-error — exercising runtime guard against wrong type
+        schedule_value: 12345,
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(getAllTasks().length).toBe(0);
+  });
+
+  it('rejects schedule_task with non-string targetJid', async () => {
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'do something',
+        schedule_type: 'once',
+        schedule_value: '2025-06-01T00:00:00',
+        // @ts-expect-error — exercising runtime guard against wrong type
+        targetJid: ['main@g.us'],
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(getAllTasks().length).toBe(0);
+  });
+
+  it('rejects pause_task / resume_task / cancel_task with non-string taskId', async () => {
+    createTask({
+      id: 'task-1',
+      group_folder: 'other-group',
+      chat_jid: 'other@g.us',
+      prompt: 'x',
+      script: null,
+      schedule_type: 'once',
+      schedule_value: '2025-06-01T00:00:00',
+      context_mode: 'isolated',
+      next_run: '2025-06-01T00:00:00.000Z',
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+    for (const type of ['pause_task', 'resume_task', 'cancel_task'] as const) {
+      await processTaskIpc(
+        // @ts-expect-error — exercising runtime guard against wrong type
+        { type, taskId: { $ne: null } },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+    }
+    const task = getTaskById('task-1');
+    expect(task?.status).toBe('active');
+  });
+
+  it('update_task ignores non-string prompt / script fields', async () => {
+    createTask({
+      id: 'task-upd',
+      group_folder: 'other-group',
+      chat_jid: 'other@g.us',
+      prompt: 'original',
+      script: null,
+      schedule_type: 'once',
+      schedule_value: '2025-06-01T00:00:00',
+      context_mode: 'isolated',
+      next_run: '2025-06-01T00:00:00.000Z',
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+    await processTaskIpc(
+      {
+        type: 'update_task',
+        taskId: 'task-upd',
+        // @ts-expect-error — exercising runtime guard against wrong type
+        prompt: { $ne: null },
+        // @ts-expect-error — exercising runtime guard against wrong type
+        script: 42,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const task = getTaskById('task-upd');
+    expect(task?.prompt).toBe('original');
+    expect(task?.script).toBeNull();
+  });
+
+  it('register_group requires all string fields', async () => {
+    await processTaskIpc(
+      {
+        type: 'register_group',
+        // @ts-expect-error — exercising runtime guard against wrong type
+        jid: { $ne: null },
+        name: 'X',
+        folder: 'x-group',
+        trigger: '@X',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(getRegisteredGroup('[object Object]')).toBeUndefined();
+    expect(Object.keys(groups).length).toBe(3);
+  });
+});
