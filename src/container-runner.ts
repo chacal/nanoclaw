@@ -26,6 +26,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -147,6 +148,52 @@ function buildVolumeMounts(
     );
   }
 
+  // Merge MCP server config on every start. Sources:
+  //   data/sessions/shared-mcp.json        → MCP servers shared by all groups
+  //   groups/{folder}/.mcp.overrides.json  → per-group additions
+  //   (HA MCP below, injected conditionally)
+  // Output:
+  //   groups/{folder}/.mcp.json            → project-level config read by Claude Code
+  const sharedMcpPath = path.join(DATA_DIR, 'sessions', 'shared-mcp.json');
+  const overridesPath = path.join(groupDir, '.mcp.overrides.json');
+  const mcpDst = path.join(groupDir, '.mcp.json');
+
+  let mergedServers: Record<string, any> = {};
+  if (fs.existsSync(sharedMcpPath)) {
+    try {
+      const shared = JSON.parse(fs.readFileSync(sharedMcpPath, 'utf-8'));
+      mergedServers = { ...mergedServers, ...(shared.mcpServers || {}) };
+    } catch (err) {
+      logger.warn({ err }, 'Failed to parse shared-mcp.json');
+    }
+  }
+  if (fs.existsSync(overridesPath)) {
+    try {
+      const overrides = JSON.parse(fs.readFileSync(overridesPath, 'utf-8'));
+      mergedServers = { ...mergedServers, ...(overrides.mcpServers || {}) };
+    } catch (err) {
+      logger.warn({ err }, 'Failed to parse .mcp.overrides.json');
+    }
+  }
+  // Route HA MCP through the credential proxy — no secrets in config files.
+  // Inject only when HA is configured on the host. HA_URL is a hostname, not
+  // a secret, but gating on presence avoids a dead /ha route in the agent's
+  // MCP list when HA isn't in use.
+  if (readEnvFile(['HA_URL']).HA_URL) {
+    mergedServers['homeassistant'] = {
+      type: 'http',
+      url: `http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}/ha/api/mcp`,
+    };
+  }
+
+  // Write the merged config unconditionally — if a previously-configured
+  // server (e.g. HA) is later removed, an empty object on disk must replace
+  // the stale config or the agent keeps seeing a dead server.
+  fs.writeFileSync(
+    mcpDst,
+    JSON.stringify({ mcpServers: mergedServers }, null, 2) + '\n',
+  );
+
   // Sync skills from container/skills/ into each group's .claude/skills/
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
   const skillsDst = path.join(groupSessionsDir, 'skills');
@@ -232,10 +279,14 @@ function buildContainerArgs(
   args.push('-e', `TZ=${TIMEZONE}`);
 
   // Route API traffic through the credential proxy (containers never see real secrets)
-  args.push(
-    '-e',
-    `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
-  );
+  const proxyBase = `http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`;
+  args.push('-e', `ANTHROPIC_BASE_URL=${proxyBase}`);
+
+  // Home Assistant proxy route. Only set when HA is configured on the host so
+  // `ha-api.sh` fails loudly (missing env var) rather than silently 502'ing.
+  if (readEnvFile(['HA_URL']).HA_URL) {
+    args.push('-e', `HA_API_URL=${proxyBase}/ha`);
+  }
 
   // Mirror the host's auth method with a placeholder value.
   // API key mode: SDK sends x-api-key, proxy replaces with real key.

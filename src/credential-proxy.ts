@@ -57,12 +57,12 @@ const HOP_BY_HOP_HEADERS = [
 ];
 
 /**
- * Match an allowed prefix with segment boundaries so `/v1/messageses` and
- * `/v1/messages-batch` do NOT pass `startsWith('/v1/messages')`. Prefixes
- * that already end in `/` are treated as directory prefixes.
+ * Match `p` against a list of allowed prefixes using segment boundaries, so
+ * `/v1/messageses` does NOT pass `/v1/messages`. A prefix ending in `/` is
+ * treated as a directory prefix (exact `startsWith` is already boundary-safe).
  */
-function isAllowedPath(p: string): boolean {
-  for (const prefix of ALLOWED_PATH_PREFIXES) {
+function matchesPrefix(p: string, prefixes: readonly string[]): boolean {
+  for (const prefix of prefixes) {
     if (prefix.endsWith('/')) {
       if (p.startsWith(prefix)) return true;
     } else if (p === prefix || p.startsWith(prefix + '/')) {
@@ -89,6 +89,31 @@ function stripHopByHop(
   for (const h of HOP_BY_HOP_HEADERS) {
     delete headers[h];
   }
+}
+
+/**
+ * A path-prefix route for non-Anthropic upstreams (e.g. Home Assistant).
+ * The proxy strips the prefix, validates the remaining path against
+ * `allowedPaths`, injects credentials via `injectCredentials`, and forwards
+ * to `upstream`.
+ */
+interface ServiceRoute {
+  /** URL prefix that selects this route (e.g. `/ha`, `/wolfram`). */
+  prefix: string;
+  /** Upstream base URL the route forwards to. */
+  upstream: URL;
+  /**
+   * Allowed path prefixes *after* the service prefix is stripped. Segment
+   * boundaries are honored via `matchesPrefix` — `/config` is not reachable
+   * via `/ha/configuration`.
+   */
+  allowedPaths: readonly string[];
+  /** Mutate headers to inject route-specific credentials. */
+  injectCredentials: (
+    headers: Record<string, string | number | string[] | undefined>,
+  ) => void;
+  /** Optional: transform the upstream path (e.g. inject query params). */
+  transformPath?: (path: string) => string;
 }
 
 /**
@@ -337,6 +362,8 @@ export function startCredentialProxy(
     'ANTHROPIC_AUTH_TOKEN',
     'ANTHROPIC_BASE_URL',
     'CLAUDE_CREDENTIALS_FILE',
+    'HA_URL',
+    'HA_TOKEN',
   ]);
 
   const authMode: AuthMode = secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
@@ -366,8 +393,82 @@ export function startCredentialProxy(
   const upstreamUrl = new URL(
     secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
   );
-  const isHttps = upstreamUrl.protocol === 'https:';
-  const makeRequest = isHttps ? httpsRequest : httpRequest;
+
+  // --- Service routes (path-prefix-based non-Anthropic upstreams) ---
+  const serviceRoutes: ServiceRoute[] = [];
+
+  if (secrets.HA_URL && secrets.HA_TOKEN) {
+    const haToken = secrets.HA_TOKEN;
+    serviceRoutes.push({
+      prefix: '/ha',
+      upstream: new URL(secrets.HA_URL),
+      allowedPaths: ['/api/'],
+      injectCredentials: (headers) => {
+        delete headers['authorization'];
+        headers['authorization'] = `Bearer ${haToken}`;
+      },
+    });
+    logger.info({ upstream: secrets.HA_URL }, 'HA service route registered');
+  }
+
+  /** Build the headers forwarded to an upstream. Centralized so every route
+   * (Anthropic and service routes) gets the same hop-by-hop scrub. */
+  function prepareHeaders(
+    req: import('http').IncomingMessage,
+    targetHost: string,
+    body: Buffer,
+  ): Record<string, string | number | string[] | undefined> {
+    const headers: Record<string, string | number | string[] | undefined> = {
+      ...(req.headers as Record<string, string>),
+      host: targetHost,
+      'content-length': body.length,
+    };
+    stripHopByHop(headers);
+    return headers;
+  }
+
+  /** Forward a prepared request to the chosen upstream and pipe the response
+   * back. On error, emit a 502 once and strip the query string from the log. */
+  function forwardRequest(
+    targetUrl: URL,
+    upstreamPath: string,
+    method: string,
+    headers: Record<string, string | number | string[] | undefined>,
+    body: Buffer,
+    res: import('http').ServerResponse,
+    logContext: string,
+  ): void {
+    const targetIsHttps = targetUrl.protocol === 'https:';
+    const doRequest = targetIsHttps ? httpsRequest : httpRequest;
+
+    const upstream = doRequest(
+      {
+        hostname: targetUrl.hostname,
+        port: targetUrl.port || (targetIsHttps ? 443 : 80),
+        path: upstreamPath,
+        method,
+        headers,
+      } as RequestOptions,
+      (upRes) => {
+        res.writeHead(upRes.statusCode!, upRes.headers);
+        upRes.pipe(res);
+      },
+    );
+
+    upstream.on('error', (err) => {
+      // Strip query string from logged path — service routes (e.g. Wolfram)
+      // inject secrets into the query string.
+      const logPath = upstreamPath.split('?')[0];
+      logger.error({ err, path: logPath }, `${logContext} upstream error`);
+      if (!res.headersSent) {
+        res.writeHead(502);
+        res.end('Bad Gateway');
+      }
+    });
+
+    upstream.write(body);
+    upstream.end();
+  }
 
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
@@ -379,7 +480,61 @@ export function startCredentialProxy(
         // bypasses like %2e%2e encoding '..' (see decodePath doc).
         const normalizedPath = path.posix.normalize(decodePath(rawUrl));
 
-        if (!isAllowedPath(normalizedPath)) {
+        // Preserve query string after path normalization.
+        const qIdx = rawUrl.indexOf('?');
+        const queryString = qIdx >= 0 ? rawUrl.slice(qIdx) : '';
+        const body = Buffer.concat(chunks);
+
+        // --- Try service routes first (path-prefix based) ---
+        const matchedRoute = serviceRoutes.find((r) =>
+          normalizedPath.startsWith(r.prefix + '/'),
+        );
+
+        if (matchedRoute) {
+          const strippedPath = normalizedPath.slice(matchedRoute.prefix.length);
+
+          if (!matchesPrefix(strippedPath, matchedRoute.allowedPaths)) {
+            logger.warn(
+              { path: normalizedPath, service: matchedRoute.prefix },
+              'Blocked request to disallowed service path',
+            );
+            res.writeHead(403);
+            res.end('Forbidden');
+            return;
+          }
+
+          const headers = prepareHeaders(req, matchedRoute.upstream.host, body);
+          // Strip container-supplied auth-bearing headers before injecting
+          // route credentials — prevents leaking Anthropic/Claude credentials
+          // (or replayed tokens / cookies) into HA / Wolfram / other service
+          // upstreams. `proxy-authorization` is already dropped by stripHopByHop.
+          // TODO: migrate to a per-route allowlist if a future route needs to
+          // forward caller-supplied custom headers.
+          delete headers['authorization'];
+          delete headers['x-api-key'];
+          delete headers['cookie'];
+          delete headers['x-auth-token'];
+          matchedRoute.injectCredentials(headers);
+
+          const strippedWithQuery = strippedPath + queryString;
+          const upstreamPath = matchedRoute.transformPath
+            ? matchedRoute.transformPath(strippedWithQuery)
+            : strippedWithQuery;
+
+          forwardRequest(
+            matchedRoute.upstream,
+            upstreamPath,
+            req.method || 'GET',
+            headers,
+            body,
+            res,
+            `Service ${matchedRoute.prefix}`,
+          );
+          return;
+        }
+
+        // --- Default: Anthropic proxy ---
+        if (!matchesPrefix(normalizedPath, ALLOWED_PATH_PREFIXES)) {
           logger.warn(
             { path: normalizedPath },
             'Blocked request to disallowed path',
@@ -389,20 +544,8 @@ export function startCredentialProxy(
           return;
         }
 
-        // Preserve query string after path normalization.
-        const qIdx = rawUrl.indexOf('?');
-        const queryString = qIdx >= 0 ? rawUrl.slice(qIdx) : '';
         const upstreamPath = normalizedPath + queryString;
-
-        const body = Buffer.concat(chunks);
-        const headers: Record<string, string | number | string[] | undefined> =
-          {
-            ...(req.headers as Record<string, string>),
-            host: upstreamUrl.host,
-            'content-length': body.length,
-          };
-
-        stripHopByHop(headers);
+        const headers = prepareHeaders(req, upstreamUrl.host, body);
 
         if (authMode === 'api-key') {
           // API key mode: inject x-api-key on every request. Also drop any
@@ -425,36 +568,15 @@ export function startCredentialProxy(
           }
         }
 
-        const upstream = makeRequest(
-          {
-            hostname: upstreamUrl.hostname,
-            port: upstreamUrl.port || (isHttps ? 443 : 80),
-            path: upstreamPath,
-            method: req.method,
-            headers,
-          } as RequestOptions,
-          (upRes) => {
-            res.writeHead(upRes.statusCode!, upRes.headers);
-            upRes.pipe(res);
-          },
+        forwardRequest(
+          upstreamUrl,
+          upstreamPath,
+          req.method || 'GET',
+          headers,
+          body,
+          res,
+          'Credential proxy',
         );
-
-        upstream.on('error', (err) => {
-          // Strip query string from logged path to avoid leaking any secrets
-          // (future service routes inject appid etc. into the query string).
-          const logPath = upstreamPath.split('?')[0];
-          logger.error(
-            { err, path: logPath },
-            'Credential proxy upstream error',
-          );
-          if (!res.headersSent) {
-            res.writeHead(502);
-            res.end('Bad Gateway');
-          }
-        });
-
-        upstream.write(body);
-        upstream.end();
       });
     });
 

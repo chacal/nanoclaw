@@ -48,6 +48,12 @@ COPY agent-runner/ ./
 # Build TypeScript
 RUN npm run build
 
+# Install ha-api helper for direct Home Assistant REST API access.
+# HA_API_URL is injected by the host runner when HA is configured; auth is
+# handled by the credential proxy, never by the container.
+COPY ha-api.sh /usr/local/bin/ha-api
+RUN chmod +x /usr/local/bin/ha-api
+
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
 

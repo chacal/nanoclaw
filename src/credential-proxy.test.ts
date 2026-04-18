@@ -716,6 +716,296 @@ describe('credential-proxy', () => {
   });
 });
 
+// --- Service routes: Home Assistant ---
+// Path-prefix routing with credential isolation. Wolfram arrives in Stage 12
+// and reuses the same dispatch; only the HA route is exercised here.
+describe('service routes — HA', () => {
+  let proxyServer: http.Server;
+  let anthropicUpstream: http.Server;
+  let haUpstream: http.Server;
+  let anthropicUpstreamPort: number;
+  let haUpstreamPort: number;
+
+  let anthropicReq: {
+    headers: http.IncomingHttpHeaders;
+    path: string;
+    method: string;
+    body: string;
+  };
+  let haReq: {
+    headers: http.IncomingHttpHeaders;
+    path: string;
+    method: string;
+    body: string;
+  };
+
+  function createUpstreamServer(): http.Server {
+    return http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        const data = {
+          headers: { ...req.headers },
+          path: req.url || '',
+          method: req.method || '',
+          body: Buffer.concat(chunks).toString(),
+        };
+        const port = (req.socket.address() as AddressInfo).port;
+        if (port === anthropicUpstreamPort) Object.assign(anthropicReq, data);
+        else if (port === haUpstreamPort) Object.assign(haReq, data);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+  }
+
+  beforeEach(async () => {
+    anthropicReq = { headers: {}, path: '', method: '', body: '' };
+    haReq = { headers: {}, path: '', method: '', body: '' };
+    anthropicUpstream = createUpstreamServer();
+    haUpstream = createUpstreamServer();
+    await Promise.all([
+      new Promise<void>((r) => anthropicUpstream.listen(0, '127.0.0.1', r)),
+      new Promise<void>((r) => haUpstream.listen(0, '127.0.0.1', r)),
+    ]);
+    anthropicUpstreamPort = (anthropicUpstream.address() as AddressInfo).port;
+    haUpstreamPort = (haUpstream.address() as AddressInfo).port;
+  });
+
+  afterEach(async () => {
+    await Promise.all([
+      new Promise<void>((r) => proxyServer?.close(() => r())),
+      new Promise<void>((r) => anthropicUpstream?.close(() => r())),
+      new Promise<void>((r) => haUpstream?.close(() => r())),
+    ]);
+    for (const key of Object.keys(mockEnv)) delete mockEnv[key];
+  });
+
+  async function startProxy(env: Record<string, string> = {}): Promise<number> {
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${anthropicUpstreamPort}`,
+      HA_URL: `http://127.0.0.1:${haUpstreamPort}`,
+      HA_TOKEN: 'ha-secret-token',
+      ...env,
+    });
+    proxyServer = await startCredentialProxy(0);
+    return (proxyServer.address() as AddressInfo).port;
+  }
+
+  it('injects Bearer token on HA requests', async () => {
+    const port = await startProxy();
+    await makeRequest(port, {
+      method: 'GET',
+      path: '/ha/api/states',
+    });
+    expect(haReq.headers['authorization']).toBe('Bearer ha-secret-token');
+  });
+
+  it('strips container-sent Authorization before injecting HA token', async () => {
+    const port = await startProxy();
+    await makeRequest(port, {
+      method: 'GET',
+      path: '/ha/api/states',
+      headers: { authorization: 'Bearer container-supplied-garbage' },
+    });
+    expect(haReq.headers['authorization']).toBe('Bearer ha-secret-token');
+  });
+
+  it('strips /ha prefix — upstream sees /api/...', async () => {
+    const port = await startProxy();
+    await makeRequest(port, {
+      method: 'GET',
+      path: '/ha/api/states/sensor.temp',
+    });
+    expect(haReq.path).toBe('/api/states/sensor.temp');
+  });
+
+  it('preserves query string on HA requests', async () => {
+    const port = await startProxy();
+    await makeRequest(port, {
+      method: 'GET',
+      path: '/ha/api/history/period/2026-04-18?filter_entity_id=sensor.temp',
+    });
+    expect(haReq.path).toBe(
+      '/api/history/period/2026-04-18?filter_entity_id=sensor.temp',
+    );
+  });
+
+  it('allows /ha/api/mcp (MCP endpoint used by agent homeassistant server)', async () => {
+    const port = await startProxy();
+    const res = await makeRequest(port, {
+      method: 'POST',
+      path: '/ha/api/mcp',
+    });
+    expect(res.statusCode).toBe(200);
+    expect(haReq.path).toBe('/api/mcp');
+  });
+
+  it('blocks /ha/config with 403 (not under /api/)', async () => {
+    const port = await startProxy();
+    const res = await makeRequest(port, {
+      method: 'GET',
+      path: '/ha/config',
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('blocks /ha/ with 403 (empty path after prefix)', async () => {
+    const port = await startProxy();
+    const res = await makeRequest(port, { method: 'GET', path: '/ha/' });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('/ha without trailing slash does not match service route → 403', async () => {
+    const port = await startProxy();
+    const res = await makeRequest(port, { method: 'GET', path: '/ha' });
+    // Falls through to Anthropic allowlist which doesn't contain /ha → 403
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('returns 403 for /ha/api/* when HA is not configured', async () => {
+    // Only Anthropic env set — HA route never registered.
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${anthropicUpstreamPort}`,
+    });
+    proxyServer = await startCredentialProxy(0);
+    const port = (proxyServer.address() as AddressInfo).port;
+
+    const res = await makeRequest(port, {
+      method: 'GET',
+      path: '/ha/api/states',
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('blocks raw `..` traversal inside /ha', async () => {
+    const port = await startProxy();
+    const res = await makeRequest(port, {
+      method: 'GET',
+      path: '/ha/api/../v1/messages',
+    });
+    // path.posix.normalize collapses .. to yield /ha/v1/messages — still in
+    // the HA branch but stripped path /v1/messages fails the /api/ allowlist.
+    // Neither upstream is contacted; proxy returns 403.
+    expect(res.statusCode).toBe(403);
+    expect(haReq.path).toBe('');
+    expect(anthropicReq.path).toBe('');
+  });
+
+  it('scrubs caller-supplied Cookie and X-Auth-Token before calling HA', async () => {
+    const port = await startProxy();
+    await makeRequest(port, {
+      method: 'GET',
+      path: '/ha/api/states',
+      headers: {
+        cookie: 'sid=exfiltrate-me',
+        'x-auth-token': 'leaked-token',
+      },
+    });
+    expect(haReq.headers['cookie']).toBeUndefined();
+    expect(haReq.headers['x-auth-token']).toBeUndefined();
+    expect(haReq.headers['authorization']).toBe('Bearer ha-secret-token');
+  });
+
+  it('blocks percent-encoded traversal from /ha into Anthropic paths', async () => {
+    const port = await startProxy();
+    const res = await makeRequest(port, {
+      method: 'GET',
+      path: '/ha/api/%2e%2e/v1/messages',
+    });
+    // Decoded+normalized to /ha/v1/messages → no longer starts with /ha/api/ → 403
+    expect(res.statusCode).toBe(403);
+    expect(haReq.path).toBe('');
+    expect(anthropicReq.path).toBe('');
+  });
+
+  it('strips hop-by-hop headers on HA route', async () => {
+    const port = await startProxy();
+    await makeRequest(port, {
+      method: 'POST',
+      path: '/ha/api/services/light/turn_on',
+      headers: {
+        'content-type': 'application/json',
+        te: 'trailers',
+        'proxy-authorization': 'Basic spy',
+        connection: 'close, x-drop-me',
+        'x-drop-me': 'should-be-dropped',
+      },
+    });
+    expect(haReq.headers['te']).toBeUndefined();
+    expect(haReq.headers['proxy-authorization']).toBeUndefined();
+    expect(haReq.headers['x-drop-me']).toBeUndefined();
+  });
+
+  it('sets Host header to HA upstream host', async () => {
+    const port = await startProxy();
+    await makeRequest(port, { method: 'GET', path: '/ha/api/states' });
+    expect(haReq.headers['host']).toBe(`127.0.0.1:${haUpstreamPort}`);
+  });
+
+  it('forwards POST body + content-length to HA', async () => {
+    const port = await startProxy();
+    const body = '{"entity_id":"light.kitchen"}';
+    await makeRequest(
+      port,
+      {
+        method: 'POST',
+        path: '/ha/api/services/light/turn_on',
+        headers: { 'content-type': 'application/json' },
+      },
+      body,
+    );
+    expect(haReq.method).toBe('POST');
+    expect(haReq.body).toBe(body);
+    expect(haReq.headers['content-length']).toBe(
+      String(Buffer.byteLength(body)),
+    );
+  });
+
+  it('HA token does NOT leak into Anthropic requests', async () => {
+    const port = await startProxy();
+    await makeRequest(port, {
+      method: 'POST',
+      path: '/v1/messages',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(anthropicReq.headers['authorization']).toBeUndefined();
+    // api-key mode: anthropic upstream sees our real api key, not HA's
+    expect(anthropicReq.headers['x-api-key']).toBe('sk-ant-real-key');
+  });
+
+  it('Anthropic API key does NOT leak into HA requests', async () => {
+    const port = await startProxy();
+    await makeRequest(port, {
+      method: 'GET',
+      path: '/ha/api/states',
+      headers: { 'x-api-key': 'sk-client-supplied' },
+    });
+    // HA route should never receive x-api-key; auth is Bearer HA_TOKEN.
+    expect(haReq.headers['x-api-key']).toBeUndefined();
+    expect(haReq.headers['authorization']).toBe('Bearer ha-secret-token');
+  });
+
+  it('returns 502 when HA upstream is unreachable', async () => {
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${anthropicUpstreamPort}`,
+      HA_URL: 'http://127.0.0.1:59999',
+      HA_TOKEN: 'ha-secret-token',
+    });
+    proxyServer = await startCredentialProxy(0);
+    const port = (proxyServer.address() as AddressInfo).port;
+
+    const res = await makeRequest(port, {
+      method: 'GET',
+      path: '/ha/api/states',
+    });
+    expect(res.statusCode).toBe(502);
+  });
+});
+
 // --- OAuth token refresh (auto-refresh + retry + rotation + dedup) ---
 //
 // These tests use vi.resetModules() + vi.doMock('https', ...) to intercept
