@@ -53,11 +53,17 @@ interface SessionsIndex {
   entries: SessionEntry[];
 }
 
+type SupportedMediaType =
+  | 'image/jpeg'
+  | 'image/png'
+  | 'image/gif'
+  | 'image/webp';
+
 type ContentBlock =
   | { type: 'text'; text: string }
   | {
       type: 'image';
-      source: { type: 'base64'; media_type: string; data: string };
+      source: { type: 'base64'; media_type: SupportedMediaType; data: string };
     };
 
 interface SDKUserMessage {
@@ -69,7 +75,7 @@ interface SDKUserMessage {
 
 const IMAGE_MARKER_RE = /\[Image:\s*(images\/[^\]]+)\]/g;
 
-const EXT_TO_MEDIA_TYPE: Record<string, string> = {
+const EXT_TO_MEDIA_TYPE: Record<string, SupportedMediaType> = {
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.png': 'image/png',
