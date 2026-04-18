@@ -8,6 +8,7 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 // Mock config
 vi.mock('./config.js', () => ({
+  CLAUDE_CODE_MODEL: '',
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
@@ -100,7 +101,11 @@ vi.mock('child_process', async () => {
   };
 });
 
-import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import {
+  runContainerAgent,
+  ContainerInput,
+  ContainerOutput,
+} from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -110,7 +115,7 @@ const testGroup: RegisteredGroup = {
   added_at: new Date().toISOString(),
 };
 
-const testInput = {
+const testInput: ContainerInput = {
   prompt: 'Hello',
   groupFolder: 'test-group',
   chatJid: 'test@g.us',
@@ -220,5 +225,89 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+});
+
+describe('settings.json regeneration', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function captureSettings(
+    group: RegisteredGroup,
+    input = testInput,
+  ): Promise<Record<string, any>> {
+    const fsMock = (await import('fs')).default;
+    (fsMock.writeFileSync as ReturnType<typeof vi.fn>).mockClear();
+    fakeProc = createFakeProcess();
+
+    const resultPromise = runContainerAgent(
+      group,
+      input,
+      () => {},
+      async () => {},
+    );
+    emitOutputMarker(fakeProc, { status: 'success', result: 'ok' });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+
+    const writeCalls = (fsMock.writeFileSync as ReturnType<typeof vi.fn>).mock
+      .calls as Array<[unknown, unknown, ...unknown[]]>;
+    const settingsCall = writeCalls.find(
+      (call) =>
+        typeof call[0] === 'string' &&
+        call[0].endsWith('/.claude/settings.json'),
+    );
+    if (!settingsCall) throw new Error('settings.json was not written');
+    return JSON.parse(settingsCall[1] as string);
+  }
+
+  it('writes thinkingBudget=high, smallModelId=claude-haiku-4-5, enableAllProjectMcpServers on every start', async () => {
+    const settings = await captureSettings(testGroup);
+    expect(settings.thinkingBudget).toBe('high');
+    expect(settings.smallModelId).toBe('claude-haiku-4-5');
+    expect(settings.enableAllProjectMcpServers).toBe(true);
+    expect(settings.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS).toBe('1');
+  });
+
+  it('uses containerConfig.model when set', async () => {
+    const settings = await captureSettings({
+      ...testGroup,
+      containerConfig: { model: 'claude-haiku-4-5-20251001' },
+    });
+    expect(settings.model).toBe('claude-haiku-4-5-20251001');
+  });
+
+  it('uses taskModel when isScheduledTask=true, falling back to model otherwise', async () => {
+    const group: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: {
+        model: 'claude-sonnet-4-6',
+        taskModel: 'claude-haiku-4-5',
+      },
+    };
+    const regular = await captureSettings(group, {
+      ...testInput,
+      isScheduledTask: false,
+    });
+    expect(regular.model).toBe('claude-sonnet-4-6');
+
+    const scheduled = await captureSettings(group, {
+      ...testInput,
+      isScheduledTask: true,
+    });
+    expect(scheduled.model).toBe('claude-haiku-4-5');
+  });
+
+  it('omits settings.model when neither containerConfig nor CLAUDE_CODE_MODEL is set', async () => {
+    const settings = await captureSettings(testGroup);
+    expect(settings.model).toBeUndefined();
   });
 });

@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  CLAUDE_CODE_MODEL,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
@@ -61,6 +62,7 @@ interface VolumeMount {
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  isScheduledTask?: boolean,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
@@ -124,29 +126,35 @@ function buildVolumeMounts(
     '.claude',
   );
   fs.mkdirSync(groupSessionsDir, { recursive: true });
+
+  // settings.json is always regenerated from .env + containerConfig — single
+  // source of truth. Manual edits to this file are overwritten on next start.
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  if (!fs.existsSync(settingsFile)) {
-    fs.writeFileSync(
-      settingsFile,
-      JSON.stringify(
-        {
-          env: {
-            // Enable agent swarms (subagent orchestration)
-            // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
-            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-            // Load CLAUDE.md from additional mounted directories
-            // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
-            CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-            // Enable Claude's memory feature (persists user preferences between sessions)
-            // https://code.claude.com/docs/en/memory#manage-auto-memory
-            CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-          },
-        },
-        null,
-        2,
-      ) + '\n',
-    );
+  const settings: Record<string, any> = {
+    env: {
+      // Enable agent swarms (subagent orchestration)
+      // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
+      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+      // Load CLAUDE.md from additional mounted directories
+      // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
+      CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+      // Enable Claude's memory feature (persists user preferences between sessions)
+      // https://code.claude.com/docs/en/memory#manage-auto-memory
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+    },
+    enableAllProjectMcpServers: true,
+    thinkingBudget: 'high',
+    smallModelId: 'claude-haiku-4-5',
+  };
+  const model = isScheduledTask
+    ? group.containerConfig?.taskModel ||
+      group.containerConfig?.model ||
+      CLAUDE_CODE_MODEL
+    : group.containerConfig?.model || CLAUDE_CODE_MODEL;
+  if (model) {
+    settings.model = model;
   }
+  fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
 
   // Merge MCP server config on every start. Sources:
   //   data/sessions/shared-mcp.json        → MCP servers shared by all groups
@@ -341,7 +349,7 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const mounts = buildVolumeMounts(group, input.isMain, input.isScheduledTask);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);
