@@ -482,11 +482,21 @@ async function runQuery(
   let messageCount = 0;
   let resultCount = 0;
 
-  // Load global CLAUDE.md as additional system context (shared across all groups)
+  // Load global SOUL.md (personality) and CLAUDE.md (instructions) as additional system context
+  const globalSoulMdPath = '/workspace/global/SOUL.md';
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
   let globalClaudeMd: string | undefined;
-  if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
-    globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
+  if (!containerInput.isMain) {
+    const parts: string[] = [];
+    if (fs.existsSync(globalSoulMdPath)) {
+      parts.push(fs.readFileSync(globalSoulMdPath, 'utf-8'));
+    }
+    if (fs.existsSync(globalClaudeMdPath)) {
+      parts.push(fs.readFileSync(globalClaudeMdPath, 'utf-8'));
+    }
+    if (parts.length > 0) {
+      globalClaudeMd = parts.join('\n\n');
+    }
   }
 
   // Discover additional directories mounted at /workspace/extra/*
