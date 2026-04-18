@@ -64,22 +64,32 @@ Messages and task operations are verified against group identity:
 | View all tasks | ✓ | Own only |
 | Manage other groups | ✓ | ✗ |
 
-### 5. Credential Isolation (OneCLI Agent Vault)
+### 5. Credential Isolation (native credential proxy)
 
-Real API credentials **never enter containers**. NanoClaw uses [OneCLI's Agent Vault](https://github.com/onecli/onecli) to proxy outbound requests and inject credentials at the gateway level.
+> **Fork note:** this fork uses a native in-process credential proxy (`src/credential-proxy.ts`) instead of the upstream OneCLI Agent Vault. See [FORK.md](FORK.md#native-credential-proxy) for the fork-specific details.
+
+Real API credentials **never enter containers**. Outbound HTTP requests from the container are routed to a credential proxy on the host, which injects the real credential on the way out and strips it from responses.
 
 **How it works:**
-1. Credentials are registered once with `onecli secrets create`, stored and managed by OneCLI
-2. When NanoClaw spawns a container, it calls `applyContainerConfig()` to route outbound HTTPS through the OneCLI gateway
-3. The gateway matches requests by host and path, injects the real credential, and forwards
-4. Agents cannot discover real credentials — not in environment, stdin, files, or `/proc`
+1. Credentials live in `.env` on the host (and optionally a credentials JSON file for OAuth auto-refresh).
+2. When NanoClaw spawns a container, it sets `ANTHROPIC_BASE_URL=http://<proxy-host>:3001` so the agent's HTTP traffic hits the proxy instead of the real upstream.
+3. The proxy matches requests against a path allowlist, injects the credential, and forwards to the upstream service.
+4. Agents cannot discover real credentials — not in environment, stdin, files, or `/proc`.
 
-**Per-agent policies:**
-Each NanoClaw group gets its own OneCLI agent identity. This allows different credential policies per group (e.g. your sales agent vs. support agent). OneCLI supports rate limits, and time-bound access and approval flows are on the roadmap.
+**Path-based service routing:**
+The proxy multiplexes multiple upstream services on one port using path prefixes (`/v1/*` → Anthropic, `/ha/*` → Home Assistant, `/wolfram/*` → Wolfram Alpha). Adding a new service means adding a route and credential binding — never exposing the credential to the container.
+
+**Proxy hardening:**
+- Segment-boundary path allowlist (prevents substring-prefix bypass).
+- Percent-decode guard against encoded path traversal.
+- RFC 7230 hop-by-hop header scrub on both request and response.
+- OAuth auto-refresh with retry/backoff and atomic `0o600` token file writes.
+- Log-scrubbing when credentials appear in error output.
 
 **NOT Mounted:**
 - Channel auth sessions (`store/auth/`) — host only
 - Mount allowlist — external, never mounted
+- `~/.config/nanoclaw/api-tokens.json` — external, never mounted
 - Any credentials matching blocked patterns
 - `.env` is shadowed with `/dev/null` in the project root mount
 
@@ -110,7 +120,8 @@ Each NanoClaw group gets its own OneCLI agent identity. This allows different cr
 │  • IPC authorization                                              │
 │  • Mount validation (external allowlist)                          │
 │  • Container lifecycle                                            │
-│  • OneCLI Agent Vault (injects credentials, enforces policies)   │
+│  • Credential proxy on :3001 (injects per-service credentials,    │
+│    segment-boundary path allowlist, OAuth auto-refresh)           │
 └────────────────────────────────┬─────────────────────────────────┘
                                  │
                                  ▼ Explicit mounts only, no secrets
@@ -119,7 +130,7 @@ Each NanoClaw group gets its own OneCLI agent identity. This allows different cr
 │  • Agent execution                                                │
 │  • Bash commands (sandboxed)                                      │
 │  • File operations (limited to mounts)                            │
-│  • API calls routed through OneCLI Agent Vault                   │
-│  • No real credentials in environment or filesystem              │
+│  • API calls routed through credential proxy (path-based)         │
+│  • No real credentials in environment or filesystem               │
 └──────────────────────────────────────────────────────────────────┘
 ```
