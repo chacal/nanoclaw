@@ -3,6 +3,8 @@ node_modules/
 .npm-cache/
 # Build output
 dist/
+dist.*/
+coverage/
 
 # Local data & auth
 store/
@@ -36,3 +38,7 @@ groups/global/*
 .nanoclaw/
 
 agents-sdk-docs
+
+# Local files (personal config, not for the public repo)
+*.local.md
+.claude/settings.local.json
