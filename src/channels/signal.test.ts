@@ -521,6 +521,44 @@ describe('image attachments', () => {
     );
   });
 
+  it('ingests multiple inbound images in a single message', async () => {
+    const { channel, onMessage, groups } = makeChannel();
+    groups['signal:+19998887777'] = { name: 'Jouni', folder: 'solo' };
+
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(Buffer.from('imgbytes'));
+
+    const proc = await connectWithFakeProc(channel);
+
+    emitStdout(
+      proc,
+      JSON.stringify({
+        method: 'receive',
+        params: {
+          envelope: {
+            sourceNumber: '+19998887777',
+            sourceName: 'Jouni',
+            timestamp: 1700000000006,
+            dataMessage: {
+              message: 'look at these',
+              attachments: [
+                { id: 'att-1', contentType: 'image/png' },
+                { id: 'att-2', contentType: 'image/jpeg' },
+                { id: 'att-3', contentType: 'image/webp' },
+              ],
+            },
+          },
+        },
+      }) + '\n',
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(ingestImageMock).toHaveBeenCalledTimes(3);
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage.mock.calls[0][1].content).toBe(
+      'look at these\n[Image: images/sig-att-1.png]\n[Image: images/sig-att-2.jpg]\n[Image: images/sig-att-3.webp]',
+    );
+  });
+
   it('drops image attachments with traversal IDs', async () => {
     const { channel, onMessage, groups } = makeChannel();
     groups['signal:+19998887777'] = { name: 'Jouni', folder: 'solo' };

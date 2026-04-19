@@ -208,7 +208,7 @@ export class SignalChannel implements Channel {
     if (!dataMessage) return;
 
     const attachments: any[] = dataMessage.attachments || [];
-    const imageAttachment = attachments.find(
+    const imageAttachments = attachments.filter(
       (a) => a?.contentType?.startsWith('image/') && a?.id,
     );
     const voiceAttachment = attachments.find(
@@ -216,7 +216,7 @@ export class SignalChannel implements Channel {
     );
 
     const text = dataMessage.message;
-    if (!text && !imageAttachment && !voiceAttachment) return;
+    if (!text && imageAttachments.length === 0 && !voiceAttachment) return;
 
     const source =
       envelope.sourceNumber || envelope.sourceUuid || envelope.source;
@@ -300,7 +300,7 @@ export class SignalChannel implements Channel {
       return;
     }
 
-    if (imageAttachment) {
+    for (const imageAttachment of imageAttachments) {
       let marker: string | null = null;
       const safePath = resolveSafeAttachmentPath(
         imageAttachment.id,
