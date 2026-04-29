@@ -2,8 +2,10 @@
  * Offer Claude-assisted debugging when a setup step fails.
  *
  * Flow:
- *   1. Check `claude` is on PATH and has a working credential. If not,
- *      silently skip — pre-auth failures can't use this path.
+ *   1. Check `claude` is on PATH — if not, offer to install it via
+ *      setup/install-claude.sh. Then check auth via `claude auth status`
+ *      — if not signed in, offer to run `claude setup-token` (browser
+ *      OAuth). If either is declined or fails, silently skip.
  *   2. Ask the user for consent ("Want me to ask Claude for a fix?").
  *   3. Build a minimal prompt: the one-paragraph situation, the failing
  *      step's name/message/hint, and a short list of *file references*
@@ -16,7 +18,7 @@
  *
  * Skippable with NANOCLAW_SKIP_CLAUDE_ASSIST=1 for CI/scripted runs.
  */
-import { execSync, spawn } from 'child_process';
+import { execSync, spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -90,7 +92,7 @@ export async function offerClaudeAssist(
   projectRoot: string = process.cwd(),
 ): Promise<boolean> {
   if (process.env.NANOCLAW_SKIP_CLAUDE_ASSIST === '1') return false;
-  if (!isClaudeUsable()) return false;
+  if (!(await ensureClaudeReady(projectRoot))) return false;
 
   const want = ensureAnswer(
     await p.confirm({
@@ -128,15 +130,70 @@ export async function offerClaudeAssist(
   return true;
 }
 
-function isClaudeUsable(): boolean {
+function isClaudeInstalled(): boolean {
   try {
     execSync('command -v claude', { stdio: 'ignore' });
+    return true;
   } catch {
     return false;
   }
-  // Availability without auth is half the story; a real query will still
-  // fail if the token isn't registered. We try first and surface the error
-  // rather than pre-checking auth with a separate round trip.
+}
+
+function isClaudeAuthenticated(): boolean {
+  try {
+    execSync('claude auth status', { stdio: 'ignore', timeout: 5_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureClaudeReady(projectRoot: string): Promise<boolean> {
+  if (!isClaudeInstalled()) {
+    const install = ensureAnswer(
+      await p.confirm({
+        message:
+          'Claude CLI is needed to diagnose this. Install it now?',
+        initialValue: true,
+      }),
+    );
+    if (!install) return false;
+
+    const code = spawnSync('bash', ['setup/install-claude.sh'], {
+      cwd: projectRoot,
+      stdio: 'inherit',
+    }).status;
+    if (code !== 0 || !isClaudeInstalled()) {
+      p.log.error("Couldn't install the Claude CLI.");
+      return false;
+    }
+    p.log.success('Claude CLI installed.');
+  }
+
+  if (!isClaudeAuthenticated()) {
+    const auth = ensureAnswer(
+      await p.confirm({
+        message:
+          "Claude CLI isn't signed in. Sign in now? (a browser will open)",
+        initialValue: true,
+      }),
+    );
+    if (!auth) return false;
+
+    const code = await new Promise<number>((resolve) => {
+      const child = spawn('claude', ['setup-token'], {
+        stdio: 'inherit',
+      });
+      child.on('close', (c) => resolve(c ?? 1));
+      child.on('error', () => resolve(1));
+    });
+    if (code !== 0 || !isClaudeAuthenticated()) {
+      p.log.error("Couldn't complete Claude sign-in.");
+      return false;
+    }
+    p.log.success('Claude CLI signed in.');
+  }
+
   return true;
 }
 
