@@ -21,7 +21,7 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import * as setupLog from '../logs.js';
-import { confirmThenOpen } from '../lib/browser.js';
+import { confirmThenOpen, formatNoteLink } from '../lib/browser.js';
 import { askOperatorRole } from '../lib/role-prompt.js';
 import {
   type Block,
@@ -51,7 +51,7 @@ export async function runTelegramChannel(displayName: string): Promise<void> {
     [
       `Opening @${botUsername} in Telegram so it's ready when the pairing code shows up.`,
       '',
-      k.dim(botUrl),
+      formatNoteLink(botUrl),
     ].join('\n'),
     'Open Telegram',
   );

@@ -19,6 +19,7 @@
 import { spawn } from 'child_process';
 
 import * as p from '@clack/prompts';
+import k from 'kleur';
 
 import { isHeadless } from '../platform.js';
 import { ensureAnswer } from './runner.js';
@@ -36,6 +37,21 @@ export function openUrl(url: string): void {
   } catch {
     // swallow — URL is visible in the note.
   }
+}
+
+/**
+ * Format a URL for display inside a setup `note(...)` card. On
+ * GUI devices the URL renders dim — it's a fallback in case the
+ * auto-open misses, and `confirmThenOpen` is doing the heavy
+ * lifting of getting the user there. On headless devices the
+ * URL becomes the user's only path forward, so we surface it
+ * with a "Get started:" label and full-strength text — copy-
+ * pasting onto another device is the actual action, not an
+ * incidental reference.
+ */
+export function formatNoteLink(url: string): string {
+  if (isHeadless()) return `Get started: ${url}`;
+  return k.dim(url);
 }
 
 /**

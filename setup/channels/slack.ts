@@ -25,7 +25,7 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import * as setupLog from '../logs.js';
-import { confirmThenOpen } from '../lib/browser.js';
+import { confirmThenOpen, formatNoteLink } from '../lib/browser.js';
 import { askOperatorRole } from '../lib/role-prompt.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
 import { accentGreen, fmtDuration, note, wrapForGutter } from '../lib/theme.js';
@@ -136,7 +136,7 @@ async function walkThroughAppCreation(): Promise<void> {
       '  4. Basic Information → copy the "Signing Secret"',
       '  5. Install to Workspace → copy the "Bot User OAuth Token" (xoxb-…)',
       '',
-      k.dim(SLACK_APPS_URL),
+      formatNoteLink(SLACK_APPS_URL),
     ].join('\n'),
     'Create a Slack app',
   );

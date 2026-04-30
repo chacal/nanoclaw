@@ -28,7 +28,7 @@ import k from 'kleur';
 
 import * as setupLog from '../logs.js';
 import { brightSelect } from '../lib/bright-select.js';
-import { confirmThenOpen } from '../lib/browser.js';
+import { confirmThenOpen, formatNoteLink } from '../lib/browser.js';
 import { askOperatorRole } from '../lib/role-prompt.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
 import { accentGreen, brandBody, fmtDuration, note } from '../lib/theme.js';
@@ -165,7 +165,7 @@ async function walkThroughBotCreation(): Promise<void> {
       '  3. On the same tab, enable "Message Content Intent"',
       '     (under Privileged Gateway Intents)',
       '',
-      k.dim(url),
+      formatNoteLink(url),
     ].join('\n'),
     'Create a Discord bot',
   );
@@ -225,7 +225,7 @@ async function walkThroughServerCreation(): Promise<void> {
       '  2. Choose "Create My Own" → "For me and my friends"',
       '  3. Give it any name (e.g. "NanoClaw")',
       '',
-      k.dim(url),
+      formatNoteLink(url),
     ].join('\n'),
     'Create a Discord server',
   );
@@ -447,7 +447,7 @@ async function promptInviteBot(
       '  1. Pick any server you\'re in (a personal one is fine)',
       '  2. Click "Authorize"',
       '',
-      k.dim(url),
+      formatNoteLink(url),
     ].join('\n'),
     'Add bot to a server',
   );
