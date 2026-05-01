@@ -42,3 +42,6 @@ agents-sdk-docs
 # Local files (personal config, not for the public repo)
 *.local.md
 .claude/settings.local.json
+
+# Codex CLI local state
+.codex
