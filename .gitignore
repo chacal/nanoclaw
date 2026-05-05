@@ -5,6 +5,8 @@ node_modules/
 .pnpm-store/
 # Build output
 dist/
+# Test coverage reports
+coverage/
 
 # Local data & auth
 store/
@@ -39,3 +41,13 @@ groups/*
 .nanoclaw/
 
 agents-sdk-docs
+
+# Codex / opencode review artifacts (always local, never committed)
+.codex
+.codex-out/
+
+# Per-user Claude Code settings (not for the public repo)
+.claude/settings.local.json
+
+# Migration worktree (created by /update-nanoclaw or /migrate-nanoclaw)
+.upgrade-worktree/
