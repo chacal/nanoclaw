@@ -100,6 +100,36 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     }
   }
 
+  // SOUL.md — persona / voice fragments owned by the human, never written by
+  // the agent. Composed alongside (and after) the SDK-auto-loaded
+  // CLAUDE.local.md memory so the persona is stable across sessions even when
+  // memory rotates.
+  //
+  // Two slots, both fork-local (the v1 `groups/global/CLAUDE.md` shared-base
+  // pattern doesn't survive v2's regenerated-CLAUDE.md model):
+  //
+  //   - `groups/global/SOUL.md` — install-wide persona shared across all
+  //     groups. Fragment name `zz-global-soul.md` sorts before per-group
+  //     SOUL but after skill/module/MCP fragments (whose names don't begin
+  //     with `zz`).
+  //   - `groups/<folder>/SOUL.md` — optional per-group role/persona override.
+  //     Fragment name `zzz-group-soul.md` sorts last so per-group context
+  //     comes after the global identity.
+  const globalSoulPath = path.resolve(GROUPS_DIR, 'global', 'SOUL.md');
+  if (fs.existsSync(globalSoulPath) && group.folder !== 'global') {
+    desired.set('zz-global-soul.md', {
+      type: 'inline',
+      content: '## Agent Persona (shared)\n\n' + fs.readFileSync(globalSoulPath, 'utf-8').trimEnd() + '\n',
+    });
+  }
+  const groupSoulPath = path.join(groupDir, 'SOUL.md');
+  if (fs.existsSync(groupSoulPath)) {
+    desired.set('zzz-group-soul.md', {
+      type: 'inline',
+      content: '## Agent Persona (this group)\n\n' + fs.readFileSync(groupSoulPath, 'utf-8').trimEnd() + '\n',
+    });
+  }
+
   // Reconcile: drop stale, write desired.
   for (const existing of fs.readdirSync(fragmentsDir)) {
     if (!desired.has(existing)) {
@@ -140,19 +170,21 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
  *     memory; after the first spawn regenerates `CLAUDE.md`, this branch
  *     is skipped because `CLAUDE.local.md` now exists)
  *
- * Globally:
- *   - delete `groups/global/` (content already in `container/CLAUDE.md`)
+ * Fork-local: `groups/global/` is preserved (NOT deleted as upstream does).
+ * It is the canonical home for `groups/global/SOUL.md`, the install-wide
+ * persona that `composeGroupClaudeMd` imports as the `zz-global-soul.md`
+ * fragment into every other group's composed CLAUDE.md. See FORK.md.
  */
-export function migrateGroupsToClaudeLocal(): void {
-  if (!fs.existsSync(GROUPS_DIR)) return;
+export function migrateGroupsToClaudeLocal(groupsDir: string = GROUPS_DIR): void {
+  if (!fs.existsSync(groupsDir)) return;
 
   const actions: string[] = [];
 
-  for (const entry of fs.readdirSync(GROUPS_DIR, { withFileTypes: true })) {
+  for (const entry of fs.readdirSync(groupsDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     if (entry.name === 'global') continue;
 
-    const groupDir = path.join(GROUPS_DIR, entry.name);
+    const groupDir = path.join(groupsDir, entry.name);
 
     const oldGlobalLink = path.join(groupDir, '.claude-global.md');
     try {
@@ -169,12 +201,6 @@ export function migrateGroupsToClaudeLocal(): void {
       fs.renameSync(claudeMd, claudeLocal);
       actions.push(`${entry.name}/CLAUDE.md → CLAUDE.local.md`);
     }
-  }
-
-  const globalDir = path.join(GROUPS_DIR, 'global');
-  if (fs.existsSync(globalDir)) {
-    fs.rmSync(globalDir, { recursive: true, force: true });
-    actions.push('groups/global/ removed');
   }
 
   if (actions.length > 0) {
