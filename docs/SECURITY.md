@@ -1,5 +1,19 @@
 # NanoClaw Security Model
 
+> **Fork warning — mount model is stale.** The "Read-Only Project Root",
+> "Session Isolation", and "Privilege Comparison" sections below describe
+> v1's mount layout (`/workspace/project`, `/workspace/project/store`,
+> `data/sessions/<group>/.claude/`). v2 changed this end-to-end. The live
+> mount model is in `src/container-runner.ts:buildMounts` — session at
+> `/workspace` (with `inbound.db` + `outbound.db` + `outbox/`), group dir
+> RW at `/workspace/agent` with nested RO mounts on `container.json` /
+> composed `CLAUDE.md` / `.claude-fragments/`, global memory RO at
+> `/workspace/global`, per-group Claude state at `/home/node/.claude` from
+> `data/v2-sessions/<group>/.claude-shared/`. Use this file for the
+> trust-model + container-isolation + credential-isolation sections; for
+> the actual filesystem boundary at cutover, read `container-runner.ts`
+> and [FORK.md](FORK.md). Upstream PR to fix this doc is pending.
+
 ## Trust Model
 
 | Entity | Trust Level | Rationale |
