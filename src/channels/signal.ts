@@ -654,17 +654,37 @@ export function createSignalAdapter(config: {
       }
     }
 
-    // Image attachments — emit `[Image: <path>]` lines so the agent's Read
-    // tool can pick them up, and surface the structured `attachments` array
-    // for consumers that prefer that shape. Without this, vision-capable
-    // models never see images sent over Signal.
-    const attachmentRefs: Array<{ path: string; contentType: string }> = [];
+    // Image attachments — read the bytes off the signal-cli attachments dir
+    // and pass them as base64 `data`. The host's session-manager stages them
+    // into `inbox/<messageId>/<name>` (visible inside the container at
+    // `/workspace/inbox/...`); a host filesystem path would be invisible to
+    // the container and the agent could neither view nor Read the image.
+    const attachmentRefs: Array<Record<string, unknown>> = [];
     for (const img of imageAttachments) {
       const imagePath = join(config.signalDataDir, 'attachments', img.id!);
-      const imageLine = `[Image: ${imagePath}]`;
-      content = content ? `${content}\n${imageLine}` : imageLine;
-      attachmentRefs.push({ path: imagePath, contentType: img.contentType || 'image/jpeg' });
+      if (!existsSync(imagePath)) {
+        log.warn('Signal: image attachment file not found', { id: img.id, path: imagePath });
+        continue;
+      }
+      try {
+        const buf = readFileSync(imagePath);
+        attachmentRefs.push({
+          type: 'image',
+          name: img.filename || img.id!,
+          mimeType: img.contentType || 'image/jpeg',
+          size: buf.length,
+          data: buf.toString('base64'),
+        });
+      } catch (err) {
+        log.warn('Signal: image attachment read failed', { id: img.id, path: imagePath, err });
+      }
     }
+
+    // If every image we tried to read was missing/unreadable and the message
+    // has no text or voice content either, there's nothing to deliver — the
+    // earlier text+voice+attachment-count guard can't catch this case because
+    // it runs before we know which files actually exist.
+    if (!content && !hasVoice && attachmentRefs.length === 0) return;
 
     const msg: InboundMessage = {
       id: String(dataMessage.timestamp ?? Date.now()),

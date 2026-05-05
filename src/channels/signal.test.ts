@@ -337,7 +337,62 @@ describe('SignalAdapter', () => {
       await adapter.teardown();
     });
 
-    it('forwards image attachments as [Image: <path>] plus structured attachments array', async () => {
+    it('forwards image attachments as base64 data so the host can stage them into the session inbox', async () => {
+      // The Signal adapter must read the bytes off signal-cli's attachments
+      // dir and pass them as base64 `data` — a host path would be invisible
+      // to the container and the agent could neither view nor Read the image.
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const attachDir = path.join('/tmp/signal-cli-test-data', 'attachments');
+      fs.mkdirSync(attachDir, { recursive: true });
+      const fixturePath = path.join(attachDir, 'att123abc');
+      const fixtureBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+      fs.writeFileSync(fixturePath, fixtureBytes);
+
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      try {
+        pushEvent({
+          sourceNumber: '+15555550123',
+          sourceName: 'Alice',
+          dataMessage: {
+            timestamp: 1700000000000,
+            attachments: [{ id: 'att123abc', contentType: 'image/jpeg', size: fixtureBytes.length }],
+          },
+        });
+
+        await new Promise((r) => setTimeout(r, 50));
+        expect(cfg.onInbound).toHaveBeenCalledWith(
+          '+15555550123',
+          null,
+          expect.objectContaining({
+            content: expect.objectContaining({
+              text: '',
+              attachments: [
+                expect.objectContaining({
+                  type: 'image',
+                  name: 'att123abc',
+                  mimeType: 'image/jpeg',
+                  size: fixtureBytes.length,
+                  data: fixtureBytes.toString('base64'),
+                }),
+              ],
+            }),
+          }),
+        );
+      } finally {
+        try {
+          fs.unlinkSync(fixturePath);
+        } catch {
+          /* best-effort */
+        }
+        await adapter.teardown();
+      }
+    });
+
+    it('skips delivery when all image attachments are missing on disk', async () => {
       const adapter = createAdapter();
       const cfg = createMockSetup();
       await adapter.setup(cfg);
@@ -347,21 +402,12 @@ describe('SignalAdapter', () => {
         sourceName: 'Alice',
         dataMessage: {
           timestamp: 1700000000000,
-          attachments: [{ id: 'att123abc', contentType: 'image/jpeg', size: 50000 }],
+          attachments: [{ id: 'missing-image-id', contentType: 'image/jpeg', size: 1234 }],
         },
       });
 
       await new Promise((r) => setTimeout(r, 50));
-      expect(cfg.onInbound).toHaveBeenCalledWith(
-        '+15555550123',
-        null,
-        expect.objectContaining({
-          content: expect.objectContaining({
-            text: expect.stringMatching(/^\[Image: .+att123abc\]$/),
-            attachments: [expect.objectContaining({ contentType: 'image/jpeg' })],
-          }),
-        }),
-      );
+      expect(cfg.onInbound).not.toHaveBeenCalled();
 
       await adapter.teardown();
     });
