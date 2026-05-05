@@ -104,6 +104,37 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
+# Google Workspace CLI — host integration. The encrypted credential dir is
+# mounted at runtime (RW) and pointed at by GOOGLE_WORKSPACE_CLI_CONFIG_DIR;
+# no secrets are baked into the image. Pin deliberately — bumping affects
+# every install in lockstep.
+#
+# Install the statically-linked musl binary directly from GitHub releases
+# rather than via `pnpm install -g`. The npm package's postinstall fetches
+# a glibc-2.39-built binary that won't run on the node:22-slim base
+# (Debian bookworm, glibc 2.36). The musl variant has no glibc dependency
+# and runs everywhere.
+ARG GOOGLEWORKSPACE_CLI_VERSION=0.22.5
+RUN ARCH="$(uname -m)" && \
+    case "$ARCH" in \
+        x86_64)  GWS_TARGET=x86_64-unknown-linux-musl ;; \
+        aarch64) GWS_TARGET=aarch64-unknown-linux-musl ;; \
+        *) echo "Unsupported arch for gws: $ARCH" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/googleworkspace/cli/releases/download/v${GOOGLEWORKSPACE_CLI_VERSION}/google-workspace-cli-${GWS_TARGET}.tar.gz" \
+        | tar -xzf - -C /tmp ./gws && \
+    install -m 0755 /tmp/gws /usr/local/bin/gws && \
+    rm -f /tmp/gws
+
+# ---- Host-integration shims --------------------------------------------------
+# Tiny bash wrappers the agent calls. They read their target URL / appid from
+# env vars set by `src/host-integrations.ts`; auth (HA only) is injected by
+# OneCLI host-pattern matching on the wire. Wolfram appid is a low-value
+# query-param credential and lives in WOLFRAM_APP_ID directly.
+COPY ha-api.sh /usr/local/bin/ha-api
+COPY wolfram-alpha.sh /usr/local/bin/wolfram-alpha
+RUN chmod +x /usr/local/bin/ha-api /usr/local/bin/wolfram-alpha
+
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh

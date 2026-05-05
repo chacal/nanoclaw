@@ -83,6 +83,18 @@ Each NanoClaw group gets its own OneCLI agent identity. This allows different cr
 - Any credentials matching blocked patterns
 - `.env` is shadowed with `/dev/null` in the project root mount
 
+> **Fork note:** the chacal/nanoclaw fork additionally contributes
+> install-wide host integrations (Google Workspace CLI, Home Assistant,
+> Wolfram Alpha) via `src/host-integrations.ts`. Mounts and env vars
+> from those integrations are added to **every** agent group's container
+> when the host has the relevant config (`~/.config/gws/credentials.enc`,
+> `HA_BASE_URL` in `.env`, `WOLFRAM_APP_ID` in `.env`). The credential
+> boundary is the OneCLI per-agent secret-mode setting — run
+> `onecli agents set-secret-mode --id <agent-id> --mode <selective|all>`
+> to scope which secrets each agent can see. Per-group gating in
+> `container.json.hostIntegrations` is a deliberate post-cutover policy
+> decision and is not implemented today. See [FORK.md](FORK.md).
+
 ## Privilege Comparison
 
 | Capability | Main Group | Non-Main Group |

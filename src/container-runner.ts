@@ -25,6 +25,7 @@ import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem, regenerateClaudeSettings } from './group-init.js';
+import { resolveHostIntegrations } from './host-integrations.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
@@ -339,6 +340,10 @@ function buildMounts(
     mounts.push(...providerContribution.mounts);
   }
 
+  // Host integrations (gws config dir, HA, Wolfram). Each integration
+  // is opt-in based on host state — see `host-integrations.ts`.
+  mounts.push(...resolveHostIntegrations().mounts);
+
   return mounts;
 }
 
@@ -452,6 +457,11 @@ async function buildContainerArgs(
     for (const [key, value] of Object.entries(providerContribution.env)) {
       args.push('-e', `${key}=${value}`);
     }
+  }
+
+  // Host-integration env vars (gws config path, HA_BASE_URL, WOLFRAM_APP_ID).
+  for (const [key, value] of Object.entries(resolveHostIntegrations().env)) {
+    args.push('-e', `${key}=${value}`);
   }
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
