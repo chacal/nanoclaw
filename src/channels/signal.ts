@@ -816,8 +816,6 @@ export function createSignalAdapter(config: {
   async function sendText(platformId: string, text: string): Promise<void> {
     if (!connected || !tcp) return;
 
-    echoCache.remember(platformId, text);
-
     const MAX_CHUNK = 4000;
     const chunks = text.length <= MAX_CHUNK ? [text] : chunkText(text, MAX_CHUNK);
 
@@ -836,6 +834,12 @@ export function createSignalAdapter(config: {
           params.recipient = [platformId];
         }
 
+        // The daemon echoes back exactly the `message` string we sent, so
+        // the echo cache key must match that string — not the original
+        // text-with-Markdown-markers. Remember after each successful send;
+        // if textStyle is rejected and we retry with the unparsed chunk,
+        // remember the chunk instead.
+        let echoKey = plainText;
         try {
           await tcp.rpc('send', params);
         } catch (styledErr) {
@@ -843,11 +847,13 @@ export function createSignalAdapter(config: {
             log.debug('Signal: textStyle rejected, retrying with markup');
             delete params.textStyle;
             params.message = chunk;
+            echoKey = chunk;
             await tcp.rpc('send', params);
           } else {
             throw styledErr;
           }
         }
+        echoCache.remember(platformId, echoKey);
       } catch (err) {
         log.error('Signal: send failed', { platformId, err });
       }

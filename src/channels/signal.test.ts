@@ -1090,6 +1090,31 @@ describe('SignalAdapter', () => {
 
       await adapter.teardown();
     });
+
+    it('skips echo after Markdown markers are stripped on send', async () => {
+      // Outbound `**Hello**` is sent to the daemon as `Hello`; the daemon
+      // echoes `Hello` back. Without keying the cache on the post-parse
+      // string, the original Markdown wouldn't match — the agent would see
+      // its own outbound as fresh inbound and reply-loop.
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      await adapter.deliver('+15555550123', null, {
+        kind: 'text',
+        content: { text: '**Hello**' },
+      });
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        dataMessage: { timestamp: 1700000000000, message: 'Hello' },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(cfg.onInbound).not.toHaveBeenCalled();
+
+      await adapter.teardown();
+    });
   });
 
   // --- Connection drop ---
