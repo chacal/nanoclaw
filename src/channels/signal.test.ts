@@ -515,6 +515,105 @@ describe('SignalAdapter', () => {
 
       await adapter.teardown();
     });
+
+    it('resolves a phone-only mention via the listContacts cache', async () => {
+      tcpRef.rpcResponses.set('listContacts', [{ number: '+15555550999', uuid: 'bob-uuid', name: 'Bob' }]);
+
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+      // Let the fire-and-forget prefill RPC settle.
+      await new Promise((r) => setTimeout(r, 20));
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        sourceName: 'Alice',
+        dataMessage: {
+          timestamp: 1700000000000,
+          message: 'hey ￼ are you here?',
+          mentions: [{ start: 4, length: 1, number: '+15555550999' }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(cfg.onInbound).toHaveBeenCalledWith(
+        '+15555550123',
+        null,
+        expect.objectContaining({
+          content: expect.objectContaining({ text: 'hey @Bob are you here?' }),
+        }),
+      );
+
+      await adapter.teardown();
+    });
+
+    it('falls back from name="+phone" to cached display name', async () => {
+      // signal-cli sometimes echoes the phone string back as `name`. Without
+      // the cache fallback the agent sees `@+15555550999` instead of `@Bob`.
+      tcpRef.rpcResponses.set('listContacts', [{ number: '+15555550999', uuid: 'bob-uuid', name: 'Bob' }]);
+
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+      await new Promise((r) => setTimeout(r, 20));
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        sourceName: 'Alice',
+        dataMessage: {
+          timestamp: 1700000000000,
+          message: 'hey ￼',
+          mentions: [{ start: 4, length: 1, name: '+15555550999', number: '+15555550999' }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(cfg.onInbound).toHaveBeenCalledWith(
+        '+15555550123',
+        null,
+        expect.objectContaining({
+          content: expect.objectContaining({ text: 'hey @Bob' }),
+        }),
+      );
+
+      await adapter.teardown();
+    });
+
+    it('populates the cache from inbound senders for later mentions', async () => {
+      // No listContacts response — cache must fill from envelopes alone.
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      // First Bob speaks; this seeds the cache (number/uuid → "Bob").
+      pushEvent({
+        source: '+15555550999',
+        sourceNumber: '+15555550999',
+        sourceUuid: 'bob-uuid',
+        sourceName: 'Bob',
+        dataMessage: { timestamp: 1700000000000, message: 'hi' },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Then Alice mentions Bob via UUID-only payload.
+      pushEvent({
+        sourceNumber: '+15555550123',
+        sourceName: 'Alice',
+        dataMessage: {
+          timestamp: 1700000000001,
+          message: 'hey ￼',
+          mentions: [{ start: 4, length: 1, uuid: 'bob-uuid' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const calls = (cfg.onInbound as unknown as ReturnType<typeof vi.fn>).mock.calls;
+      const aliceCall = calls.find((c: unknown[]) => (c[2] as any).content.sender === '+15555550123');
+      expect(aliceCall).toBeDefined();
+      expect((aliceCall![2] as any).content.text).toBe('hey @Bob');
+
+      await adapter.teardown();
+    });
   });
 
   // --- Quote context ---
