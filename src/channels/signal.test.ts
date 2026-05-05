@@ -394,6 +394,54 @@ describe('SignalAdapter', () => {
 
   // --- mention resolution ---
 
+  describe('bot-mention detection (isMention)', () => {
+    it('sets isMention=true when the bot account is in the mentions list', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        sourceName: 'Alice',
+        dataMessage: {
+          timestamp: 1700000000000,
+          groupV2: { id: 'kouluapu' },
+          message: 'hey ￼ can you help with math?',
+          mentions: [{ start: 4, length: 1, name: 'Pentti', number: '+15551234567' }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(cfg.onInbound).toHaveBeenCalledWith('group:kouluapu', null, expect.objectContaining({ isMention: true }));
+
+      await adapter.teardown();
+    });
+
+    it('does not set isMention when the mention is for someone else', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        sourceName: 'Alice',
+        dataMessage: {
+          timestamp: 1700000000000,
+          groupV2: { id: 'kouluapu' },
+          message: 'hey ￼ are you here?',
+          mentions: [{ start: 4, length: 1, name: 'Bob', number: '+15555550999' }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      const calls = (cfg.onInbound as unknown as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls).toHaveLength(1);
+      expect(calls[0][2]).not.toHaveProperty('isMention');
+
+      await adapter.teardown();
+    });
+  });
+
   describe('mention resolution', () => {
     it('replaces inline mention placeholders with display names', async () => {
       const adapter = createAdapter();

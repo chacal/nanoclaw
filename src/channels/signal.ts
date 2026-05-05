@@ -587,6 +587,13 @@ export function createSignalAdapter(config: {
 
     const rawText = (dataMessage.message ?? '').trim();
     const text = rawText ? resolveMentions(rawText, dataMessage.mentions) : '';
+    // Bot-mention detection: signal-cli's mention payload carries `number` for
+    // recipients it has on file, which always includes our own account. The
+    // router uses this to honor `engage_mode='mention'` / `'mention-sticky'`
+    // — without it, group wirings would have to fall back on regex pattern
+    // matching against the resolved display name, which breaks whenever the
+    // sender has the bot saved under a different contact name.
+    const isMention = !!dataMessage.mentions?.some((m) => m.number === config.account);
 
     const audioAttachment = dataMessage.attachments?.find((a) => a.contentType?.startsWith('audio/') && a.id);
     const imageAttachments = dataMessage.attachments?.filter((a) => a.contentType?.startsWith('image/') && a.id) ?? [];
@@ -671,6 +678,8 @@ export function createSignalAdapter(config: {
         ...(dataMessage.quote ? quoteToContent(dataMessage.quote) : {}),
       },
       timestamp,
+      ...(isMention ? { isMention: true } : {}),
+      ...(isGroup ? { isGroup: true } : {}),
     };
     await setup.onInbound(platformId, null, msg);
 
