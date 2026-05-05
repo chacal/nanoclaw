@@ -47,6 +47,22 @@ export interface ContainerConfig {
   agentGroupId?: string;
   /** Max messages per prompt. Falls back to code default if unset. */
   maxMessagesPerPrompt?: number;
+  /**
+   * Override the default Claude model for this group. Written into the
+   * Claude Code settings.json at spawn time (`model` field). Falls back to
+   * Claude Code's built-in default when unset.
+   */
+  model?: string;
+  /**
+   * Reserved for scheduled-task model selection. v2 has no spawn-time
+   * `isScheduledTask` signal yet, so this field is currently inert; kept
+   * for forward compatibility with v1 group records.
+   */
+  taskModel?: string;
+  /** Claude Code `thinkingBudget` setting (e.g. "low" | "medium" | "high"). */
+  thinkingBudget?: string;
+  /** Claude Code `smallModelId` setting for cheap subagent calls. */
+  smallModelId?: string;
 }
 
 function emptyConfig(): ContainerConfig {
@@ -87,6 +103,10 @@ export function readContainerConfig(folder: string): ContainerConfig {
       assistantName: raw.assistantName,
       agentGroupId: raw.agentGroupId,
       maxMessagesPerPrompt: raw.maxMessagesPerPrompt,
+      model: raw.model,
+      taskModel: raw.taskModel,
+      thinkingBudget: raw.thinkingBudget,
+      smallModelId: raw.smallModelId,
     };
   } catch (err) {
     console.error(`[container-config] failed to parse ${p}: ${String(err)}`);

@@ -24,7 +24,7 @@ import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContaine
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
-import { initGroupFilesystem } from './group-init.js';
+import { initGroupFilesystem, regenerateClaudeSettings } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
@@ -255,6 +255,14 @@ function buildMounts(
   // Sync skill symlinks based on container.json selection before mounting.
   const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
   syncSkillSymlinks(claudeDir, containerConfig);
+
+  // Regenerate Claude Code settings.json from container.json overrides on
+  // every spawn — model / thinkingBudget / smallModelId edits take effect on
+  // the next message without needing to recreate the group. The merge
+  // preserves any user-set fields not managed by container.json (plugin
+  // marketplace, permissions, manual env overrides) so this rewrite never
+  // silently drops settings the user added by hand.
+  regenerateClaudeSettings(path.join(claudeDir, 'settings.json'), containerConfig);
 
   // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
   // fragments, and MCP server instructions. See `claude-md-compose.ts`.
