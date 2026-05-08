@@ -75,4 +75,17 @@ describe('sanitizeTelegramLegacyMarkdown', () => {
     const input = '```\n---\n```';
     expect(sanitizeTelegramLegacyMarkdown(input)).toBe(input);
   });
+
+  it('unescapes \\~ injected by remark-stringify+gfm', () => {
+    expect(sanitizeTelegramLegacyMarkdown('see \\~/projects/foo path')).toBe('see ~/projects/foo path');
+  });
+
+  it('unescapes \\| injected by remark-stringify+gfm', () => {
+    expect(sanitizeTelegramLegacyMarkdown('a \\| b')).toBe('a | b');
+  });
+
+  it('leaves \\~ inside code spans alone', () => {
+    const input = 'literal `\\~` token';
+    expect(sanitizeTelegramLegacyMarkdown(input)).toBe(input);
+  });
 });

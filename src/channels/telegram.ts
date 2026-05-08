@@ -204,6 +204,17 @@ registerChannelAdapter('telegram', {
       botToken: token,
       mode: 'polling',
     });
+
+    // Bypass the adapter's markdown round-trip. By default `fromMarkdown` does
+    // `parseMarkdown` + `stringifyMarkdown` (with remark-gfm), which escapes
+    // literal `~` to `\~` and `|` to `\|` for GFM-safe re-parsing — but
+    // Telegram's legacy `Markdown` parse_mode does not honor `\` escapes, so
+    // the user sees a stray backslash. `transformOutboundText` already
+    // produces legacy-Markdown-shaped text, so the round-trip is pure loss.
+    // Skip it: pass the sanitized string straight through.
+    const converter = (telegramAdapter as unknown as { formatConverter: { fromMarkdown: (s: string) => string } })
+      .formatConverter;
+    converter.fromMarkdown = (md: string) => md;
     const bridge = createChatSdkBridge({
       adapter: telegramAdapter,
       concurrency: 'concurrent',

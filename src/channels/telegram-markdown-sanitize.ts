@@ -33,6 +33,12 @@ export function sanitizeTelegramLegacyMarkdown(input: string): string {
   // `*` / `_` characters would otherwise unbalance the delimiter counts below.
   text = text.replace(/^[ \t]*[-_*]{3,}[ \t]*$/gm, '⎯⎯⎯');
 
+  // remark-stringify (with remark-gfm) escapes literal `~` and `|` as `\~` /
+  // `\|` to keep round-tripping safe against GFM strikethrough/tables. Legacy
+  // Telegram Markdown does not honor backslash escapes, so the user sees a
+  // stray backslash. Strip them here (code segments are already placeheld).
+  text = text.replace(/\\([~|])/g, '$1');
+
   text = text.replace(/\*\*([^*\n]+?)\*\*/g, '*$1*');
   text = text.replace(/__([^_\n]+?)__/g, '_$1_');
 
