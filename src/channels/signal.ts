@@ -336,8 +336,13 @@ interface SignalEnvelope {
  * Replace inline `@<placeholder>` mention markers with display names so the
  * agent sees `@Alice` instead of a raw UUID. Signal's protocol uses a single
  * placeholder character (typically U+FFFC) at each mention's `start` offset.
+ *
+ * `nameCache` (if provided) is consulted as a fallback when the mention
+ * payload only carries a phone or UUID — signal-cli often does this for
+ * contacts the local cache hasn't seen, so without the lookup early group
+ * messages render as `@+15555550123` instead of `@Bob`.
  */
-function resolveMentions(text: string, mentions?: SignalMention[]): string {
+function resolveMentions(text: string, mentions?: SignalMention[], nameCache?: Map<string, string>): string {
   if (!mentions || mentions.length === 0) return text;
   const sorted = [...mentions].sort((a, b) => (a.start ?? 0) - (b.start ?? 0));
   let result = '';
@@ -345,13 +350,33 @@ function resolveMentions(text: string, mentions?: SignalMention[]): string {
   for (const m of sorted) {
     const start = m.start ?? 0;
     const length = m.length ?? 1;
-    const name = m.name || m.number || (m.uuid ? m.uuid.slice(0, 8) : 'someone');
+    const name = resolveMentionName(m, nameCache);
     if (start < cursor) continue;
     result += text.slice(cursor, start) + `@${name}`;
     cursor = start + length;
   }
   result += text.slice(cursor);
   return result;
+}
+
+/**
+ * Pick the best display name for a mention payload. signal-cli sometimes
+ * fills `name` with the phone or UUID itself when it has no contact entry —
+ * detect that and fall through to the name cache instead.
+ */
+function resolveMentionName(m: SignalMention, nameCache?: Map<string, string>): string {
+  if (m.name && !m.name.startsWith('+') && !/^[0-9a-f]{8}-/.test(m.name)) {
+    return m.name;
+  }
+  if (m.number) {
+    const cached = nameCache?.get(m.number);
+    if (cached) return cached;
+  }
+  if (m.uuid) {
+    const cached = nameCache?.get(m.uuid);
+    if (cached) return cached;
+  }
+  return m.name || m.number || (m.uuid ? m.uuid.slice(0, 8) : 'someone');
 }
 
 /**
@@ -550,12 +575,32 @@ export function createSignalAdapter(config: {
   let tcp: SignalTcpClient | null = null;
   let connected = false;
   const echoCache = new EchoCache();
+  // phone/UUID → display name. Populated on connect from `listContacts` and
+  // incrementally from each inbound envelope's sourceName. Used by
+  // `resolveMentions` to translate mention payloads that only carry a phone
+  // or UUID into a real display name.
+  const nameCache = new Map<string, string>();
   let setup: ChannelSetup | null = null;
 
   // -- inbound handling --
 
   function handleNotification(method: string, params: unknown): void {
     if (method === 'receive') {
+      // signal-cli reports per-envelope decode failures in `exception` and
+      // still sends the notification, but with every field of the envelope
+      // null — so `handleEnvelope` drops it at the `!dataMessage` guard and
+      // nothing is logged. That is how a server-side change (issue #2059:
+      // sealed-sender envelopes lost `serverGuid`, throwing NPE inside
+      // libsignal) silently swallowed *all* inbound messages for months
+      // while sending kept working. Log it: a decode failure is a real
+      // fault, not a message we chose to ignore.
+      const exception = (params as any)?.exception;
+      if (exception) {
+        log.warn('Signal: envelope failed to decode, message dropped', {
+          type: exception.type,
+          message: exception.message,
+        });
+      }
       const envelope = (params as any)?.envelope;
       if (envelope) {
         handleEnvelope(envelope).catch((err) => {
@@ -609,7 +654,7 @@ export function createSignalAdapter(config: {
     if (!dataMessage) return;
 
     const rawText = (dataMessage.message ?? '').trim();
-    const text = rawText ? resolveMentions(rawText, dataMessage.mentions) : '';
+    const text = rawText ? resolveMentions(rawText, dataMessage.mentions, nameCache) : '';
 
     const audioAttachment = dataMessage.attachments?.find((a) => a.contentType?.startsWith('audio/') && a.id);
     const imageAttachments = dataMessage.attachments?.filter((a) => a.contentType?.startsWith('image/') && a.id) ?? [];
@@ -621,6 +666,21 @@ export function createSignalAdapter(config: {
     if (!sender) return;
 
     const senderName = (envelope.sourceName?.trim() || sender).trim();
+
+    // Cache sender identifiers → display name so a later mention carrying
+    // only the phone/UUID resolves to the real name. Skip when the "name"
+    // is just the identifier (no information gain).
+    if (senderName && senderName !== sender) {
+      nameCache.set(sender, senderName);
+      const sourceUuid = envelope.sourceUuid?.trim();
+      if (sourceUuid && sourceUuid !== senderName) {
+        nameCache.set(sourceUuid, senderName);
+      }
+      const sourceNumber = envelope.sourceNumber?.trim();
+      if (sourceNumber && sourceNumber !== senderName) {
+        nameCache.set(sourceNumber, senderName);
+      }
+    }
 
     // Modern Signal groups use groupV2; legacy groupInfo.groupId is the
     // pre-V2 fallback. Without the V2 read, V2-only groups appear as DMs
@@ -670,17 +730,37 @@ export function createSignalAdapter(config: {
       }
     }
 
-    // Image attachments — emit `[Image: <path>]` lines so the agent's Read
-    // tool can pick them up, and surface the structured `attachments` array
-    // for consumers that prefer that shape. Without this, vision-capable
-    // models never see images sent over Signal.
-    const attachmentRefs: Array<{ path: string; contentType: string }> = [];
+    // Image attachments — read the bytes off the signal-cli attachments dir
+    // and pass them as base64 `data`. The host's session-manager stages them
+    // into `inbox/<messageId>/<name>` (visible inside the container at
+    // `/workspace/inbox/...`); a host filesystem path would be invisible to
+    // the container and the agent could neither view nor Read the image.
+    const attachmentRefs: Array<Record<string, unknown>> = [];
     for (const img of imageAttachments) {
       const imagePath = join(config.signalDataDir, 'attachments', img.id!);
-      const imageLine = `[Image: ${imagePath}]`;
-      content = content ? `${content}\n${imageLine}` : imageLine;
-      attachmentRefs.push({ path: imagePath, contentType: img.contentType || 'image/jpeg' });
+      if (!existsSync(imagePath)) {
+        log.warn('Signal: image attachment file not found', { id: img.id, path: imagePath });
+        continue;
+      }
+      try {
+        const buf = readFileSync(imagePath);
+        attachmentRefs.push({
+          type: 'image',
+          name: img.filename || img.id!,
+          mimeType: img.contentType || 'image/jpeg',
+          size: buf.length,
+          data: buf.toString('base64'),
+        });
+      } catch (err) {
+        log.warn('Signal: image attachment read failed', { id: img.id, path: imagePath, err });
+      }
     }
+
+    // If every image we tried to read was missing/unreadable and the message
+    // has no text or voice content either, there's nothing to deliver — the
+    // earlier text+voice+attachment-count guard can't catch this case because
+    // it runs before we know which files actually exist.
+    if (!content && !hasVoice && attachmentRefs.length === 0) return;
 
     const msg: InboundMessage = {
       id: String(dataMessage.timestamp ?? Date.now()),
@@ -722,6 +802,44 @@ export function createSignalAdapter(config: {
         text,
       },
     };
+  }
+
+  // -- mention name cache --
+
+  /**
+   * Pull the contact list from signal-cli over JSON-RPC and seed `nameCache`.
+   * Called fire-and-forget after connect. Best-effort: signal-cli builds that
+   * don't expose `listContacts` simply return an error which we swallow —
+   * the cache then populates from inbound envelopes instead.
+   */
+  async function prefillNameCache(): Promise<void> {
+    if (!tcp) return;
+    let contacts: unknown;
+    try {
+      contacts = await tcp.rpc('listContacts', {});
+    } catch (err) {
+      log.debug('Signal: listContacts unavailable; mention name cache will fill from messages', { err });
+      return;
+    }
+    if (!Array.isArray(contacts)) return;
+    let count = 0;
+    for (const c of contacts as Array<Record<string, unknown>>) {
+      const name = (c.profileName as string | undefined) || (c.name as string | undefined);
+      if (!name) continue;
+      const number = c.number as string | undefined;
+      const uuid = c.uuid as string | undefined;
+      if (number && name !== number) {
+        nameCache.set(number, name);
+        count++;
+      }
+      if (uuid && name !== uuid) {
+        nameCache.set(uuid, name);
+        count++;
+      }
+    }
+    if (count > 0) {
+      log.info('Signal: name cache prefilled', { entries: count });
+    }
   }
 
   // -- send helpers --
@@ -899,6 +1017,13 @@ export function createSignalAdapter(config: {
         host: config.tcpHost,
         port: config.tcpPort,
       });
+
+      // Best-effort: prefill the mention name cache from signal-cli's contact
+      // list so the very first inbound group message can resolve mentions
+      // to display names. Errors are swallowed (older signal-cli builds may
+      // not support `listContacts`) — the cache also fills incrementally
+      // from inbound envelopes.
+      void prefillNameCache();
     },
 
     async teardown(): Promise<void> {

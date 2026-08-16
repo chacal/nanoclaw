@@ -368,7 +368,62 @@ describe('SignalAdapter', () => {
       await adapter.teardown();
     });
 
-    it('forwards image attachments as [Image: <path>] plus structured attachments array', async () => {
+    it('forwards image attachments as base64 data so the host can stage them into the session inbox', async () => {
+      // The Signal adapter must read the bytes off signal-cli's attachments
+      // dir and pass them as base64 `data` — a host path would be invisible
+      // to the container and the agent could neither view nor Read the image.
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const attachDir = path.join('/tmp/signal-cli-test-data', 'attachments');
+      fs.mkdirSync(attachDir, { recursive: true });
+      const fixturePath = path.join(attachDir, 'att123abc');
+      const fixtureBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+      fs.writeFileSync(fixturePath, fixtureBytes);
+
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      try {
+        pushEvent({
+          sourceNumber: '+15555550123',
+          sourceName: 'Alice',
+          dataMessage: {
+            timestamp: 1700000000000,
+            attachments: [{ id: 'att123abc', contentType: 'image/jpeg', size: fixtureBytes.length }],
+          },
+        });
+
+        await new Promise((r) => setTimeout(r, 50));
+        expect(cfg.onInbound).toHaveBeenCalledWith(
+          '+15555550123',
+          null,
+          expect.objectContaining({
+            content: expect.objectContaining({
+              text: '',
+              attachments: [
+                expect.objectContaining({
+                  type: 'image',
+                  name: 'att123abc',
+                  mimeType: 'image/jpeg',
+                  size: fixtureBytes.length,
+                  data: fixtureBytes.toString('base64'),
+                }),
+              ],
+            }),
+          }),
+        );
+      } finally {
+        try {
+          fs.unlinkSync(fixturePath);
+        } catch {
+          /* best-effort */
+        }
+        await adapter.teardown();
+      }
+    });
+
+    it('skips delivery when all image attachments are missing on disk', async () => {
       const adapter = createAdapter();
       const cfg = createMockSetup();
       await adapter.setup(cfg);
@@ -378,21 +433,12 @@ describe('SignalAdapter', () => {
         sourceName: 'Alice',
         dataMessage: {
           timestamp: 1700000000000,
-          attachments: [{ id: 'att123abc', contentType: 'image/jpeg', size: 50000 }],
+          attachments: [{ id: 'missing-image-id', contentType: 'image/jpeg', size: 1234 }],
         },
       });
 
       await new Promise((r) => setTimeout(r, 50));
-      expect(cfg.onInbound).toHaveBeenCalledWith(
-        '+15555550123',
-        null,
-        expect.objectContaining({
-          content: expect.objectContaining({
-            text: expect.stringMatching(/^\[Image: .+att123abc\]$/),
-            attachments: [expect.objectContaining({ contentType: 'image/jpeg' })],
-          }),
-        }),
-      );
+      expect(cfg.onInbound).not.toHaveBeenCalled();
 
       await adapter.teardown();
     });
@@ -449,6 +495,105 @@ describe('SignalAdapter', () => {
           content: expect.objectContaining({ text: 'hey @Bob are you here?' }),
         }),
       );
+
+      await adapter.teardown();
+    });
+
+    it('resolves a phone-only mention via the listContacts cache', async () => {
+      tcpRef.rpcResponses.set('listContacts', [{ number: '+15555550999', uuid: 'bob-uuid', name: 'Bob' }]);
+
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+      // Let the fire-and-forget prefill RPC settle.
+      await new Promise((r) => setTimeout(r, 20));
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        sourceName: 'Alice',
+        dataMessage: {
+          timestamp: 1700000000000,
+          message: 'hey ￼ are you here?',
+          mentions: [{ start: 4, length: 1, number: '+15555550999' }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(cfg.onInbound).toHaveBeenCalledWith(
+        '+15555550123',
+        null,
+        expect.objectContaining({
+          content: expect.objectContaining({ text: 'hey @Bob are you here?' }),
+        }),
+      );
+
+      await adapter.teardown();
+    });
+
+    it('falls back from name="+phone" to cached display name', async () => {
+      // signal-cli sometimes echoes the phone string back as `name`. Without
+      // the cache fallback the agent sees `@+15555550999` instead of `@Bob`.
+      tcpRef.rpcResponses.set('listContacts', [{ number: '+15555550999', uuid: 'bob-uuid', name: 'Bob' }]);
+
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+      await new Promise((r) => setTimeout(r, 20));
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        sourceName: 'Alice',
+        dataMessage: {
+          timestamp: 1700000000000,
+          message: 'hey ￼',
+          mentions: [{ start: 4, length: 1, name: '+15555550999', number: '+15555550999' }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(cfg.onInbound).toHaveBeenCalledWith(
+        '+15555550123',
+        null,
+        expect.objectContaining({
+          content: expect.objectContaining({ text: 'hey @Bob' }),
+        }),
+      );
+
+      await adapter.teardown();
+    });
+
+    it('populates the cache from inbound senders for later mentions', async () => {
+      // No listContacts response — cache must fill from envelopes alone.
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      // First Bob speaks; this seeds the cache (number/uuid → "Bob").
+      pushEvent({
+        source: '+15555550999',
+        sourceNumber: '+15555550999',
+        sourceUuid: 'bob-uuid',
+        sourceName: 'Bob',
+        dataMessage: { timestamp: 1700000000000, message: 'hi' },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Then Alice mentions Bob via UUID-only payload.
+      pushEvent({
+        sourceNumber: '+15555550123',
+        sourceName: 'Alice',
+        dataMessage: {
+          timestamp: 1700000000001,
+          message: 'hey ￼',
+          mentions: [{ start: 4, length: 1, uuid: 'bob-uuid' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const calls = (cfg.onInbound as unknown as ReturnType<typeof vi.fn>).mock.calls;
+      const aliceCall = calls.find((c: unknown[]) => (c[2] as any).content.sender === '+15555550123');
+      expect(aliceCall).toBeDefined();
+      expect((aliceCall![2] as any).content.text).toBe('hey @Bob');
 
       await adapter.teardown();
     });
