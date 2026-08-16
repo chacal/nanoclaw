@@ -92,6 +92,100 @@ describe('composeGroupClaudeMd persona prepend', () => {
   });
 });
 
+describe('composeGroupClaudeMd SOUL layers (fork)', () => {
+  function writeSoul(folder: string, text: string): void {
+    const dir = path.join(GROUPS_DIR, folder);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'SOUL.md'), text);
+  }
+
+  it('imports the global soul for a non-global group, after built-in fragments', () => {
+    const ag = group('ag-soul-1', 'soul-group-1');
+    seed(ag);
+    writeSoul('global', 'Shared persona.');
+
+    composeGroupClaudeMd(ag);
+
+    const imports = importsOf(ag.folder);
+    expect(imports[imports.length - 1]).toBe('@./.claude-fragments/soul-global.md');
+    expect(fs.readFileSync(path.join(GROUPS_DIR, ag.folder, '.claude-fragments', 'soul-global.md'), 'utf-8')).toBe(
+      'Shared persona.',
+    );
+  });
+
+  it('imports group soul last, after the global soul', () => {
+    const ag = group('ag-soul-2', 'soul-group-2');
+    seed(ag);
+    writeSoul('global', 'Shared persona.');
+    writeSoul(ag.folder, 'Group persona override.');
+
+    composeGroupClaudeMd(ag);
+
+    const imports = importsOf(ag.folder);
+    expect(imports[imports.length - 2]).toBe('@./.claude-fragments/soul-global.md');
+    expect(imports[imports.length - 1]).toBe('@./.claude-fragments/soul-group.md');
+    // Both come after the shared base and every built-in fragment.
+    expect(imports.indexOf('@./.claude-shared.md')).toBeLessThan(
+      imports.indexOf('@./.claude-fragments/soul-global.md'),
+    );
+  });
+
+  it('does not apply the global soul to the global folder itself', () => {
+    const ag = group('ag-soul-global', 'global');
+    seed(ag);
+    writeSoul('global', 'Shared persona.');
+
+    composeGroupClaudeMd(ag);
+
+    const imports = importsOf('global');
+    expect(imports).not.toContain('@./.claude-fragments/soul-global.md');
+    // The global folder's own SOUL.md still applies as its group soul.
+    expect(imports[imports.length - 1]).toBe('@./.claude-fragments/soul-group.md');
+  });
+
+  it('is inert when no SOUL files exist', () => {
+    const ag = group('ag-soul-none', 'soul-group-none');
+    seed(ag);
+
+    composeGroupClaudeMd(ag);
+
+    const imports = importsOf(ag.folder);
+    expect(imports.join('\n')).not.toContain('soul-');
+  });
+
+  it('keeps soul fragments across recompose and prunes them when the file is deleted', () => {
+    const ag = group('ag-soul-prune', 'soul-group-prune');
+    seed(ag);
+    writeSoul(ag.folder, 'Persona v1.');
+
+    composeGroupClaudeMd(ag);
+    composeGroupClaudeMd(ag);
+    const fragPath = path.join(GROUPS_DIR, ag.folder, '.claude-fragments', 'soul-group.md');
+    expect(fs.existsSync(fragPath)).toBe(true);
+
+    fs.unlinkSync(path.join(GROUPS_DIR, ag.folder, 'SOUL.md'));
+    composeGroupClaudeMd(ag);
+    expect(fs.existsSync(fragPath)).toBe(false);
+    expect(importsOf(ag.folder).join('\n')).not.toContain('soul-');
+  });
+
+  it('layers souls together with a template persona: persona first, souls last', () => {
+    const ag = group('ag-soul-persona', 'soul-persona-group');
+    seed(ag);
+    writePersona(ag.folder, 'Template persona.');
+    writeSoul('global', 'Shared persona.');
+    writeSoul(ag.folder, 'Group persona.');
+
+    composeGroupClaudeMd(ag);
+
+    const imports = importsOf(ag.folder);
+    expect(imports[0]).toBe('@./.claude-fragments/persona.md');
+    expect(imports[1]).toBe('@./.claude-shared.md');
+    expect(imports[imports.length - 2]).toBe('@./.claude-fragments/soul-global.md');
+    expect(imports[imports.length - 1]).toBe('@./.claude-fragments/soul-group.md');
+  });
+});
+
 describe('composeGroupClaudeMd scheduling instructions (ncl tasks reach-in)', () => {
   // Red-on-delete guard for the `scheduling`/`cli` exclusion at the
   // module-fragment loop: the agent is taught `ncl tasks` iff it has ncl.

@@ -20,11 +20,26 @@ import { GROUPS_DIR } from './config.js';
 import type { McpServerConfig } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { readGroupPersona } from './group-persona.js';
+import { log } from './log.js';
 import type { AgentGroup } from './types.js';
 
 // Fragment holding a template's persona prepend. Imported FIRST (before the
 // shared base) so the persona is the top of the composed system prompt.
 const PERSONA_FRAGMENT = 'persona.md';
+
+// Fork-local SOUL slots: human-owned persona files kept outside
+// upstream-tracked paths so upstream merges never collide with persona
+// edits. `groups/global/SOUL.md` layers into every group except the global
+// folder itself; `groups/<folder>/SOUL.md` is the per-group persona.
+// Distinct from the template persona above (`instructions.prepend.md`,
+// written once by templates): SOUL files are curated by the operator and
+// re-read on every compose. Imported LAST — after the shared base and all
+// built-in fragments — group soul after global so the group-specific
+// persona wins conflicts.
+const SOUL_FILE = 'SOUL.md';
+const GLOBAL_SOUL_FRAGMENT = 'soul-global.md';
+const GROUP_SOUL_FRAGMENT = 'soul-group.md';
+const SOUL_FRAGMENTS = [GLOBAL_SOUL_FRAGMENT, GROUP_SOUL_FRAGMENT];
 
 // Symlink targets are container paths — dangling on host (hence the readlink
 // dance instead of existsSync), valid inside the container via RO mounts.
@@ -118,6 +133,18 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     desired.set(PERSONA_FRAGMENT, { type: 'inline', content: persona });
   }
 
+  // Fork-local SOUL layers (see the constants above for the model).
+  if (group.folder !== 'global') {
+    const globalSoul = readSoulFile(path.join(path.resolve(GROUPS_DIR, 'global'), SOUL_FILE));
+    if (globalSoul) {
+      desired.set(GLOBAL_SOUL_FRAGMENT, { type: 'inline', content: globalSoul });
+    }
+  }
+  const groupSoul = readSoulFile(path.join(groupDir, SOUL_FILE));
+  if (groupSoul) {
+    desired.set(GROUP_SOUL_FRAGMENT, { type: 'inline', content: groupSoul });
+  }
+
   // Reconcile: drop stale, write desired.
   for (const existing of fs.readdirSync(fragmentsDir)) {
     if (!desired.has(existing)) {
@@ -134,17 +161,49 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
   }
 
   // Composed entry — imports only. Persona first (top of the system prompt),
-  // then the shared base, then the remaining fragments sorted.
+  // then the shared base, then the remaining fragments sorted, then the
+  // fork-local SOUL layers last (global before group so the group-specific
+  // persona wins conflicts).
   const imports: string[] = [];
   if (desired.has(PERSONA_FRAGMENT)) {
     imports.push(`@./.claude-fragments/${PERSONA_FRAGMENT}`);
   }
   imports.push('@./.claude-shared.md');
-  for (const name of [...desired.keys()].filter((n) => n !== PERSONA_FRAGMENT).sort()) {
+  for (const name of [...desired.keys()].filter((n) => n !== PERSONA_FRAGMENT && !SOUL_FRAGMENTS.includes(n)).sort()) {
     imports.push(`@./.claude-fragments/${name}`);
+  }
+  for (const name of SOUL_FRAGMENTS) {
+    if (desired.has(name)) {
+      imports.push(`@./.claude-fragments/${name}`);
+    }
   }
   const body = [COMPOSED_HEADER, ...imports, ''].join('\n');
   writeAtomic(path.join(groupDir, 'CLAUDE.md'), body);
+}
+
+/**
+ * Read a SOUL persona file without following symlinks. Mirrors
+ * `readGroupPersona` but for the fork's human-owned SOUL slots.
+ */
+function readSoulFile(file: string): string | null {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    if (!fs.fstatSync(fd).isFile()) return null;
+    const content = fs.readFileSync(fd, 'utf-8').trim();
+    return content || null;
+  } catch (err) {
+    if (typeof err === 'object' && err !== null && 'code' in err && (err as { code?: string }).code === 'ENOENT') {
+      return null;
+    }
+    log.warn('Could not read SOUL file; omitting persona layer', {
+      file,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
 }
 
 function syncSymlink(linkPath: string, target: string): void {
