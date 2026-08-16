@@ -9,3 +9,4 @@
 import './cli.js';
 import './signal.js';
 import './telegram.js';
+import './api.js';
