@@ -156,7 +156,7 @@ to every group** — a new secret reaches only the `all`-mode agents
 
 | Integration | Trigger | Container surface |
 |-------------|---------|-------------------|
-| Google Workspace CLI (`gws`) | `~/.config/gws/credentials.enc` + `.encryption_key` exist on host | RW mount of `~/.config/gws` → `/workspace/gws-config`; env `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` + `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file`. CLI installed in the agent image. |
+| Google Workspace CLI (`gws`) | `~/.config/gws/credentials.enc` + `.encryption_key` exist on host | RW mount of `~/.config/gws` → `/workspace/gws-config`; env `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` + `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file`. CLI installed in the agent image; `container/skills/google-workspace/` teaches agents to use it. |
 | Home Assistant (`ha-api`) | `HA_BASE_URL` set in `.env` | Env `HA_BASE_URL` injected; `container/ha-api.sh` shim calls `${HA_BASE_URL}/api/...` directly. Authorization comes from OneCLI host-pattern injection on the matching host (configured at cutover). |
 
 Wolfram Alpha used to be a third row here. Since 2026-08-16 it contributes
@@ -167,6 +167,15 @@ under the next section instead.
 Belt-and-braces: gws requires both `credentials.enc` and `.encryption_key`;
 mounting just one would let the container write into a dir it can't decrypt
 and corrupt host state.
+
+The `google-workspace` container skill is load-bearing, not a nicety. Without
+it nothing durable tells agents that `gws` exists. They then follow the
+`onecli-gateway` skill (which uses Google Drive as its example), curl
+`googleapis.com` through the gateway, get `app_not_connected`, and send users
+OneCLI "connect Google" links. Do not follow those links: they would add a
+second, OneCLI-mediated Google path next to `gws`. This happened on
+2026-10-18, when Kouluapu's compaction dropped the `gws` know-how that had
+lived only in its conversation history.
 
 ## MCP servers with vault credentials (per-group)
 
