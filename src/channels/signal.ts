@@ -586,6 +586,21 @@ export function createSignalAdapter(config: {
 
   function handleNotification(method: string, params: unknown): void {
     if (method === 'receive') {
+      // signal-cli reports per-envelope decode failures in `exception` and
+      // still sends the notification, but with every field of the envelope
+      // null — so `handleEnvelope` drops it at the `!dataMessage` guard and
+      // nothing is logged. That is how a server-side change (issue #2059:
+      // sealed-sender envelopes lost `serverGuid`, throwing NPE inside
+      // libsignal) silently swallowed *all* inbound messages for months
+      // while sending kept working. Log it: a decode failure is a real
+      // fault, not a message we chose to ignore.
+      const exception = (params as any)?.exception;
+      if (exception) {
+        log.warn('Signal: envelope failed to decode, message dropped', {
+          type: exception.type,
+          message: exception.message,
+        });
+      }
       const envelope = (params as any)?.envelope;
       if (envelope) {
         handleEnvelope(envelope).catch((err) => {

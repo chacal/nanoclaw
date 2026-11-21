@@ -62,6 +62,7 @@ vi.mock('node:net', () => ({
 
 import type { ChannelSetup } from './adapter.js';
 import { computeSignalIsMention, createSignalAdapter } from './signal.js';
+import { log } from '../log.js';
 
 // --- Test helpers ---
 
@@ -445,6 +446,34 @@ describe('SignalAdapter', () => {
   });
 
   // --- groupV2 ---
+
+  describe('envelope decode failures', () => {
+    it('logs a warning and delivers nothing when signal-cli reports a decode exception', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      // signal-cli sends the notification with an `exception` and an envelope
+      // whose fields are all null when it cannot decode a message.
+      const notification =
+        JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'receive',
+          params: {
+            envelope: { source: null, sourceNumber: null, timestamp: null, dataMessage: null },
+            exception: { type: 'NullPointerException', message: 'serverGuid is null' },
+          },
+        }) + '\n';
+      tcpRef.fakeSocket!.emit('data', Buffer.from(notification));
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(log.warn).toHaveBeenCalledWith('Signal: envelope failed to decode, message dropped', {
+        type: 'NullPointerException',
+        message: 'serverGuid is null',
+      });
+      expect(cfg.onInbound).not.toHaveBeenCalled();
+    });
+  });
 
   describe('group routing', () => {
     it('routes to groupV2.id when present, falling back to legacy groupInfo.groupId', async () => {
