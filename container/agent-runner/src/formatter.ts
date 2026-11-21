@@ -262,7 +262,14 @@ function formatChatMessages(messages: MessageInRow[]): string {
 function formatSingleChat(msg: MessageInRow): string {
   if (isSessionEcho(msg)) return formatEchoMessage(msg);
   const content = parseContent(msg.content);
-  const sender = content.sender || content.author?.fullName || content.author?.userName || 'Unknown';
+  const rawSender = content.sender || content.author?.fullName || content.author?.userName || 'Unknown';
+  // Native adapters (Signal, WhatsApp, iMessage) put the platform id in
+  // `sender` and the display name in `senderName`. Show the name, and keep the
+  // id visible in `sender_id`: names are sender-chosen and can collide, so
+  // anything identity-sensitive must be able to check the id (upstream #3858).
+  const senderName = typeof content.senderName === 'string' ? content.senderName.trim() : '';
+  const sender = senderName || rawSender;
+  const senderIdAttr = senderName && senderName !== rawSender ? ` sender_id="${escapeXml(rawSender)}"` : '';
   const time = formatLocalTime(msg.timestamp, TIMEZONE);
   const text = content.text || '';
   const idAttr = msg.seq != null ? ` id="${msg.seq}"` : '';
@@ -274,7 +281,7 @@ function formatSingleChat(msg: MessageInRow): string {
 
   const fromAttr = originAttr(msg);
 
-  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}</message>`;
+  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}"${senderIdAttr} time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}</message>`;
 }
 
 /**

@@ -251,6 +251,33 @@ describe('reply_to + quoted_message rendering', () => {
   });
 });
 
+describe('sender display name', () => {
+  it('shows senderName and keeps the native id in sender_id', () => {
+    insertMessage('m1', 'chat', {
+      sender: '8162a30e-15b6-4468-bfb1-7933ccfa3ee9',
+      senderId: 'signal:8162a30e-15b6-4468-bfb1-7933ccfa3ee9',
+      senderName: 'Venla',
+      text: 'Moikka!',
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('sender="Venla" sender_id="8162a30e-15b6-4468-bfb1-7933ccfa3ee9"');
+  });
+
+  it('omits sender_id when sender already is the display name', () => {
+    insertMessage('m1', 'chat', { sender: 'Alice', senderName: 'Alice', text: 'hi' });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('sender="Alice"');
+    expect(result).not.toContain('sender_id=');
+  });
+
+  it('falls back to sender when senderName is missing', () => {
+    insertMessage('m1', 'chat', { sender: '+15555550123', text: 'hi' });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('sender="+15555550123"');
+    expect(result).not.toContain('sender_id=');
+  });
+});
+
 describe('XML escaping', () => {
   it('escapes <, >, &, " in sender and body', () => {
     insertMessage('m1', 'chat', {
