@@ -1,0 +1,47 @@
+#!/bin/bash
+# Query Home Assistant REST API.
+#
+# The shim calls HA directly. Authorization is injected by OneCLI's
+# gateway using a host-pattern secret (vault secret with host pattern
+# <ha-host> and an `Authorization: Bearer {value}` header, attached to each
+# agent with `onecli agents grants attach-secret`). The container never sees
+# the HA token.
+#
+# Path in the container: /app/skills/home-assistant/ha-api
+#
+# Usage:
+#   ha-api GET /api/states/sensor.nordpool
+#   ha-api POST /api/services/light/turn_on '{"entity_id":"light.kitchen"}'
+#   ha-api GET /api/history/period/2026-03-22T00:00:00Z?filter_entity_id=sensor.temp
+
+set -euo pipefail
+
+METHOD="${1:-}"
+ENDPOINT="${2:-}"
+BODY="${3:-}"
+
+if [ -z "$METHOD" ] || [ -z "$ENDPOINT" ]; then
+  echo "Usage: ha-api <METHOD> <endpoint> [json_body]" >&2
+  echo "Examples:" >&2
+  echo "  ha-api GET /api/states/sensor.nordpool" >&2
+  echo "  ha-api POST /api/services/light/turn_on '{\"entity_id\":\"light.kitchen\"}'" >&2
+  exit 1
+fi
+
+# The base URL is not a secret. It used to come from the host .env as
+# HA_BASE_URL; the env var still overrides the default.
+HA_BASE_URL="${HA_BASE_URL:-https://ha.chacal.fi}"
+
+CURL_ARGS=(
+  -sf
+  -X "$METHOD"
+  -H "Content-Type: application/json"
+)
+
+if [ -n "$BODY" ]; then
+  # --data-raw (not -d / --data): `-d @file` would read a local file when the
+  # body starts with '@'. We pass the body literally, as advertised.
+  CURL_ARGS+=(--data-raw "$BODY")
+fi
+
+curl "${CURL_ARGS[@]}" "${HA_BASE_URL}${ENDPOINT}"
