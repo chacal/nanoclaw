@@ -25,6 +25,7 @@ or an own new file that cannot conflict on merge.
 | Signal: inbound images, mention names, decode-failure log | Patch in the installed `src/channels/signal.ts` | **Yes** |
 | Sender display names in the agent prompt (Kouluapu twins) | Patch in `container/agent-runner/src/formatter.ts` (upstream #3858) | **Yes** |
 | Telegram | Upstream `/add-telegram`, unchanged | No |
+| Voice questions from Jouni's iPhone (Siri Shortcut "Kysymys Pentille") | Upstream `/add-emacs` HTTP channel wired to Pentti + LAN socket proxy + rules in Pentti's prepend (see below) | No |
 
 The two **Yes** rows are the whole core diff. Both are PR candidates; open
 nothing upstream without Jouni's approval.
@@ -75,6 +76,34 @@ reports name `jouni-signal` explicitly. The old Telegram agent group `ag-1777836
 ("Pentti Telegram (archived)", `groups/telegram_pentti`) has no wiring and no
 OneCLI grants; its notes were merged into `signal_jouni`.
 
+## Voice questions (iPhone Shortcut)
+
+Since 2026-11-22. "Hei Siri, kysymys Pentille" → Siri asks for the question →
+the Shortcut sends it to Pentti and Siri speaks the answer. Siri gives up
+after ~30 s, so the Shortcut stops waiting at ~25 s.
+
+- **Transport:** the upstream Emacs channel (`/add-emacs`, a plain commit on
+  `base`). It is a small HTTP bridge: `POST /api/message {"text"}` returns a
+  ms `timestamp`; `GET /api/messages?since=<timestamp>` returns the replies.
+  Bearer token. `.env`: `EMACS_ENABLED`, `EMACS_CHANNEL_PORT=8766`,
+  `EMACS_AUTH_TOKEN` (also in the Shortcut), `EMACS_PLATFORM_ID=iphone-voice`.
+  It listens on `127.0.0.1` only.
+- **Network:** user units `~/.config/systemd/user/pentti-voice-proxy.{socket,service}`
+  (`systemd-socket-proxyd`, no package) listen on `10.50.100.12:8767` and
+  forward to `127.0.0.1:8766`. The phone reaches it over the home VPN.
+  Plain HTTP inside the VPN; the token is the access control.
+- **Wiring:** messaging group "Jouni iPhone voice" (`emacs`, `iphone-voice`)
+  → Pentti, `agent-shared` (same conversation as Signal/Telegram). Sender
+  user `emacs:iphone-voice` is a member of Pentti.
+- **Behaviour:** section "Voice questions from Jouni's iPhone" in
+  `groups/signal_jouni/instructions.prepend.md`: one message, one or two plain
+  sentences, `wiki/private/` may be spoken, longer details to `jouni-signal`.
+  On timeout the Shortcut sends "(Aikakatkaisu: lähetä vastaus Signaliin.)"
+  and Pentti sends the answer to `jouni-signal`.
+- **Measured:** 4.7–6.6 s per vault question, cold start included.
+- **Remove:** `systemctl --user disable --now pentti-voice-proxy.socket`,
+  set `EMACS_ENABLED=false`, delete the wiring/messaging group.
+
 ## Persona
 
 Master copy: `groups/global/SOUL.md` (shared) and `groups/<folder>/SOUL.md`
@@ -88,6 +117,12 @@ for g in signal_jouni signal_kouluapu signal_oona signal_perhe signal_venla; do
   { cat global/SOUL.md; [ -f $g/SOUL.md ] && { printf '\n\n'; cat $g/SOUL.md; }; } > $g/instructions.prepend.md
 done
 ```
+
+**Exception — do not regenerate `signal_jouni` with this loop.** Pentti's
+prepend has edits that are in no master (the Telegram list rule, the vault
+section, the voice section); there is no `groups/signal_jouni/SOUL.md`.
+Edit that prepend file directly, or move those sections into a
+`signal_jouni/SOUL.md` master first.
 
 Changes apply at the next container start. The group folder is agent-writable,
 so an agent can edit its own prepend file; the SOUL masters are the reference.
