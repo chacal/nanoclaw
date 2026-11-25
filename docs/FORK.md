@@ -23,11 +23,14 @@ or an own new file that cannot conflict on merge.
 | Todoist | `@doist/todoist-mcp` as a per-group MCP server; token from the vault | No — container config |
 | Morning brief when Jouni wakes up | Scheduled task with a gate script that polls an HA helper | No — task in DB |
 | Signal: inbound images, mention names, decode-failure log | Patch in the installed `src/channels/signal.ts` | **Yes** |
+| Signal: Markdown → text styles (`_` inside words, code spans, fenced blocks and `\_` escapes survive) | Own file `src/channels/signal-styles.ts` (CommonMark rules, no dependency) + one import line in `signal.ts` replacing the upstream regex converter | **Yes** |
 | Sender display names in the agent prompt (Kouluapu twins) | Patch in `container/agent-runner/src/formatter.ts` (upstream #3858) | **Yes** |
 | Telegram | Upstream `/add-telegram`, unchanged | No |
 | Voice questions from Jouni's iPhone (Siri Shortcut "Kysymys Pentille") | Upstream `/add-emacs` HTTP channel wired to Pentti + LAN socket proxy + rules in Pentti's prepend (see below) | No |
 
-The two **Yes** rows are the whole core diff. Both are PR candidates; open
+The **Yes** rows are the whole core diff: Signal adapter changes and the
+formatter patch. All are PR candidates (upstream's `channels` branch still has
+the regex converter that broke `sensor.iphone_15_pro_max_battery_state`); open
 nothing upstream without Jouni's approval.
 
 ## Branch model
