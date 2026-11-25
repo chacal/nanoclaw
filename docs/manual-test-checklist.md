@@ -6,7 +6,7 @@ History: 2026-08-15 refork, rewritten for the 2026-11-21 refork (2026.11.0).
 
 ## Host sanity (before chat)
 
-- [ ] `systemctl --user is-active nanoclaw` — `active`, stays up. If the error
+- [ ] `systemctl --user is-active nanoclaw-v2-c8d7084f` — `active`, stays up. If the error
       log says "Upgrade tripwire": `pnpm exec tsx scripts/upgrade-state.ts set` + restart
 - [ ] `ss -ltnp 'sport = :3000'` — at most one owner, the new PID (KillMode
       orphan check). `WEBHOOK_HOST` unset → it listens on 127.0.0.1 only

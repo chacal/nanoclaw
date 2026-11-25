@@ -151,7 +151,7 @@ so an agent can edit its own prepend file; the SOUL masters are the reference.
   Side effect: the app then reports the approval-poll address as
   `localhost:10255`, where nothing listens on the host, so held requests
   ("ask" grants) time out with no log line. The fix is the systemd drop-in
-  `~/.config/systemd/user/nanoclaw.service.d/onecli-gateway-url.conf`
+  `~/.config/systemd/user/nanoclaw-v2-c8d7084f.service.d/onecli-gateway-url.conf`
   (`ONECLI_GATEWAY_URL=http://172.17.0.1:10255`). Keep both together.
 
 ### Google (since 2026-11-21)
@@ -225,7 +225,15 @@ load AWT/ImageIO, so outbound image attachments fail.
 
 ## Service (Linux)
 
-`systemctl --user start|stop|restart|status nanoclaw`; logs in
+The unit is `nanoclaw-v2-c8d7084f.service` (`nanoclaw-v2-<slug>`, slug = first 8
+chars of sha1 of the project path), renamed from `nanoclaw.service` on
+2026-11-25 so upstream tooling finds it. Before the rename `setup/lib/restart.sh`
+answered "no installed service". The unit file and its OneCLI drop-in
+directory live in `~/.config/systemd/user/`.
+
+The unit runs `dist/index.js`, so **build first** (`pnpm run build`); then
+`bash setup/lib/restart.sh` (restarts and waits until the new host answers) or
+`systemctl --user start|stop|restart|status nanoclaw-v2-c8d7084f`. Logs in
 `logs/nanoclaw.log` and `logs/nanoclaw.error.log`. `KillMode=process`: check the
 port owner after a restart (normally nothing listens on :3000 now). Stamp the
 upgrade state after any upgrade, branch flip or commit (see Branch model).

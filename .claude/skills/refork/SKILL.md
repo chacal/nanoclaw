@@ -137,11 +137,11 @@ pnpm exec tsx scripts/upgrade-state.ts set
 Then restart the service:
 
 ```bash
-systemctl --user restart nanoclaw       # Linux (this host)
+pnpm run build && bash setup/lib/restart.sh   # Linux (this host; unit nanoclaw-v2-c8d7084f runs dist/)
 # launchctl kickstart -k gui/$(id -u)/com.nanoclaw   # macOS
 ```
 
-Verify port 3000 owner — `systemctl --user restart nanoclaw` can leave a port-3000 orphan because of `KillMode=process`:
+Verify port 3000 owner — a restart can leave a port-3000 orphan because of `KillMode=process`:
 
 ```bash
 ss -ltnp 'sport = :3000' || lsof -iTCP:3000 -sTCP:LISTEN
