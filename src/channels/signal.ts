@@ -15,6 +15,7 @@ import { join } from 'node:path';
 
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import { parseSignalStyles } from './signal-styles.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 
@@ -477,79 +478,6 @@ function chunkText(text: string, limit: number): string[] {
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-// ---------------------------------------------------------------------------
-// Signal text styles — convert Markdown to Signal's offset-based formatting
-// ---------------------------------------------------------------------------
-
-interface SignalTextStyle {
-  style: 'BOLD' | 'ITALIC' | 'STRIKETHROUGH' | 'MONOSPACE' | 'SPOILER';
-  start: number;
-  length: number;
-}
-
-interface StyledText {
-  text: string;
-  textStyles: SignalTextStyle[];
-}
-
-/**
- * Convert Markdown-ish input to Signal's offset-based style ranges.
- *
- * Walks the input recursively: at each level we find the leftmost matching
- * pattern, descend into its captured inner text (so `**bold with \`code\`
- * inside**` stays bold-plus-monospace rather than leaking stripped markers),
- * then continue past the match. Style offsets are recorded against the
- * *output* text length as it's built, so nested styles always point at the
- * right span of the final plain text.
- */
-function parseSignalStyles(input: string): StyledText {
-  const styles: SignalTextStyle[] = [];
-
-  // Ordering matters: longer/greedier delimiters first so `` ``` `` beats
-  // `` ` ``, `**` beats `*`. The italic-`*` pattern refuses to start on
-  // whitespace so `*` isn't mistakenly opened on " * " in list-like text.
-  const patterns: Array<{ regex: RegExp; style: SignalTextStyle['style'] }> = [
-    { regex: /```([\s\S]+?)```/, style: 'MONOSPACE' },
-    { regex: /`([^`]+)`/, style: 'MONOSPACE' },
-    { regex: /\*\*([^]+?)\*\*/, style: 'BOLD' },
-    { regex: /~~([^]+?)~~/, style: 'STRIKETHROUGH' },
-    { regex: /\|\|([^]+?)\|\|/, style: 'SPOILER' },
-    { regex: /\*([^*\s][^*]*?)\*/, style: 'ITALIC' },
-    { regex: /_([^_\s][^_]*?)_/, style: 'ITALIC' },
-  ];
-
-  function walk(segment: string, outputBase: number): string {
-    let earliest: { start: number; match: RegExpExecArray; style: SignalTextStyle['style'] } | null = null;
-    for (const { regex, style } of patterns) {
-      const m = regex.exec(segment);
-      if (!m) continue;
-      if (earliest === null || m.index < earliest.start) {
-        earliest = { start: m.index, match: m, style };
-      }
-    }
-    if (!earliest) return segment;
-
-    const before = segment.slice(0, earliest.start);
-    const fullMatch = earliest.match[0];
-    const inner = earliest.match[1];
-    const afterStart = earliest.start + fullMatch.length;
-    const after = segment.slice(afterStart);
-
-    const innerOut = walk(inner, outputBase + before.length);
-    styles.push({
-      style: earliest.style,
-      start: outputBase + before.length,
-      length: innerOut.length,
-    });
-    const afterOut = walk(after, outputBase + before.length + innerOut.length);
-
-    return before + innerOut + afterOut;
-  }
-
-  const text = walk(input, 0);
-  return { text, textStyles: styles };
-}
 
 // ---------------------------------------------------------------------------
 // SignalAdapter — v2 ChannelAdapter implementation
